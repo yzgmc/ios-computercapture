@@ -1,13 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  注意：CI 会在构建时根据实际安装的 provisioning profile 重新生成此文件。
+  本地导出时，请将 PROVISIONING_PROFILE_UUID 替换为 profile 的真实 UUID。
+-->
 <plist version="1.0">
 <dict>
     <key>method</key>
     <string>development</string>
+    <key>signingStyle</key>
+    <string>manual</string>
     <key>teamID</key>
     <string>7KQ4Z998AK</string>
-    <key>signingStyle</key>
-    <string>automatic</string>
+    <key>provisioningProfiles</key>
+    <dict>
+        <key>com.yzg.phonecam</key>
+        <string>PROVISIONING_PROFILE_UUID</string>
+    </dict>
     <key>stripSwiftSymbols</key>
     <true/>
     <key>thinning</key>
