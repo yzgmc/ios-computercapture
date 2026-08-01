@@ -59,30 +59,14 @@ jobs:
             -scheme PhoneCam \
             -sdk iphonesimulator \
             -destination 'platform=iOS Simulator,name=iPhone 16' \
+            CONFIGURATION_BUILD_DIR=$PWD/build \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             | xcbeautify --renderer github-actions
-
-      - name: Archive iOS app
-        working-directory: ios
-        run: |
-          set -o pipefail
-          xcodebuild archive \
-            -workspace PhoneCam.xcworkspace \
-            -scheme PhoneCam \
-            -sdk iphoneos \
-            -archivePath $RUNNER_TEMP/PhoneCam.xcarchive \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            | xcbeautify --renderer github-actions
-        continue-on-error: true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ios-build-artifacts
-          path: |
-            ios/build/**
-            $RUNNER_TEMP/PhoneCam.xcarchive
-          if-no-files-found: ignore
+          path: ios/build/**
+          if-no-files-found: error
