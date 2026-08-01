@@ -1,0 +1,112 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-server:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Package signaling server
+        run: |
+          cd signaling
+          zip -r ../signaling-server.zip .
+
+      - name: Package desktop client
+        run: |
+          cd desktop
+          zip -r ../desktop-client.zip .
+
+      - name: Upload server artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-artifacts
+          path: |
+            signaling-server.zip
+            desktop-client.zip
+          if-no-files-found: error
+
+  build-ios:
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode version
+        run: sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer
+
+      - name: Install iOS platform
+        run: xcodebuild -downloadPlatform iOS
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Install CocoaPods dependencies
+        working-directory: ios
+        run: |
+          gem install cocoapods
+          pod install --repo-update
+
+      - name: Build iOS app
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild clean build \
+            -workspace PhoneCam.xcworkspace \
+            -scheme PhoneCam \
+            -sdk iphonesimulator \
+            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            CONFIGURATION_BUILD_DIR=$PWD/build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            | xcbeautify --renderer github-actions
+
+      - name: Package iOS simulator IPA
+        working-directory: ios
+        run: |
+          mkdir -p Payload
+          cp -R build/PhoneCam.app Payload/
+          zip -r PhoneCam-simulator.ipa Payload
+
+      - name: Upload iOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-artifacts
+          path: ios/PhoneCam-simulator.ipa
+          if-no-files-found: error
+
+  release:
+    needs: [build-server, build-ios]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download server artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: server-artifacts
+          path: artifacts
+
+      - name: Download iOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-artifacts
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.0.${{ github.run_number }}
+          name: PhoneCam v0.0.${{ github.run_number }}
+          files: artifacts/*
+          generate_release_notes: true
+          make_latest: true
