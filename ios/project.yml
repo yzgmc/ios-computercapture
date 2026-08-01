@@ -12,7 +12,7 @@ targets:
     settings:
       base:
         INFOPLIST_FILE: PhoneCam/Info.plist
-        PRODUCT_BUNDLE_IDENTIFIER: com.phonecam.app
+        PRODUCT_BUNDLE_IDENTIFIER: com.yzgmc.phonecam
         CODE_SIGN_IDENTITY: ""
         CODE_SIGNING_REQUIRED: NO
         CODE_SIGNING_ALLOWED: NO
