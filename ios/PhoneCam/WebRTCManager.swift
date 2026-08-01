@@ -28,7 +28,7 @@ class WebRTCManager: NSObject, ObservableObject {
                 await self?.handleSignalingMessage(message)
             }
         }
-        await client.connect()
+        client.connect()
         self.signalingClient = client
         statusMessage = "已连接信令服务器"
     }
@@ -98,7 +98,7 @@ class WebRTCManager: NSObject, ObservableObject {
             let iceCandidate = RTCIceCandidate(sdp: candidate,
                                                sdpMLineIndex: sdpMLineIndex,
                                                sdpMid: sdpMid)
-            try? peerConnection?.add(iceCandidate)
+            try? await peerConnection?.add(iceCandidate)
         }
     }
 
