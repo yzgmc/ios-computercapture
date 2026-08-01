@@ -27,9 +27,19 @@ class PhoneCamWeb {
             volumeValue: document.getElementById("volumeValue"),
             connectBtn: document.getElementById("connectBtn"),
             disconnectBtn: document.getElementById("disconnectBtn"),
+            log: document.getElementById("log"),
         };
 
         this.init();
+    }
+
+    log(message) {
+        const line = `[${new Date().toLocaleTimeString()}] ${message}`;
+        console.log(line);
+        if (this.els.log) {
+            this.els.log.textContent += line + "\n";
+            this.els.log.scrollTop = this.els.log.scrollHeight;
+        }
     }
 
     init() {
@@ -37,6 +47,8 @@ class PhoneCamWeb {
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
         const defaultUrl = `${protocol}//${window.location.host}`;
         this.els.serverUrl.value = defaultUrl;
+
+        this.checkSecureContext();
 
         this.els.connectBtn.addEventListener("click", () => this.connect());
         this.els.disconnectBtn.addEventListener("click", () => this.disconnect());
@@ -63,6 +75,17 @@ class PhoneCamWeb {
         });
     }
 
+    checkSecureContext() {
+        if (!window.isSecureContext) {
+            this.setStatus("需要 HTTPS", "error");
+            this.log("错误：当前不是安全上下文。请通过 https:// 或 localhost 访问。");
+        }
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            this.setStatus("浏览器不支持", "error");
+            this.log("错误：当前浏览器不支持 getUserMedia。请使用 Safari（iOS）或 Chrome（Android/桌面）。");
+        }
+    }
+
     setStatus(text, type = "") {
         this.els.status.textContent = text;
         this.els.status.className = "status " + type;
@@ -76,7 +99,6 @@ class PhoneCamWeb {
                 width: { ideal: res.width },
                 height: { ideal: res.height },
                 frameRate: { ideal: fps },
-                facingMode: { ideal: "environment" },
             },
             audio: {
                 echoCancellation: true,
@@ -85,18 +107,57 @@ class PhoneCamWeb {
         };
     }
 
-    async startMedia() {
-        try {
-            const constraints = this.getConstraints();
-            this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
-            this.els.localVideo.srcObject = this.localStream;
-            this.els.localVideo.classList.add("active");
-            this.els.placeholder.classList.add("hidden");
-            this.updateVolume();
-        } catch (err) {
-            console.error("getUserMedia error:", err);
-            throw new Error("无法访问摄像头或麦克风，请检查权限设置");
+    getFallbackConstraints() {
+        return {
+            video: { facingMode: { ideal: "environment" } },
+            audio: true,
+        };
+    }
+
+    translateMediaError(err) {
+        switch (err.name) {
+            case "NotAllowedError":
+                return "摄像头/麦克风权限被拒绝。请在 Safari 设置中允许访问。";
+            case "NotFoundError":
+                return "找不到摄像头或麦克风设备。";
+            case "NotReadableError":
+                return "摄像头/麦克风被其他应用占用或硬件异常。";
+            case "OverconstrainedError":
+                return "设备不支持所选分辨率/帧率，将尝试降低要求。";
+            case "SecurityError":
+                return "安全上下文错误，请通过 HTTPS 访问并信任证书。";
+            default:
+                return `获取媒体失败: ${err.name}: ${err.message}`;
         }
+    }
+
+    async startMedia() {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            throw new Error("浏览器不支持摄像头/麦克风访问");
+        }
+
+        const constraints = this.getConstraints();
+        this.log("尝试获取媒体: " + JSON.stringify(constraints));
+
+        try {
+            this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
+        } catch (err) {
+            this.log(`首次获取失败: ${err.name}`);
+            if (err.name === "OverconstrainedError" || err.name === "NotFoundError") {
+                this.log("尝试使用默认媒体约束...");
+                this.localStream = await navigator.mediaDevices.getUserMedia(this.getFallbackConstraints());
+            } else {
+                throw err;
+            }
+        }
+
+        this.log("媒体获取成功，轨道: " +
+            this.localStream.getTracks().map((t) => `${t.kind}(${t.label})`).join(", "));
+
+        this.els.localVideo.srcObject = this.localStream;
+        this.els.localVideo.classList.add("active");
+        this.els.placeholder.classList.add("hidden");
+        this.updateVolume();
     }
 
     updateVolume() {
@@ -129,6 +190,7 @@ class PhoneCamWeb {
     async connect() {
         this.els.connectBtn.disabled = true;
         this.setStatus("连接中...", "connecting");
+        this.log("开始连接...");
 
         try {
             this.serverUrl = this.els.serverUrl.value.trim();
@@ -141,9 +203,12 @@ class PhoneCamWeb {
             this.connected = true;
             this.els.disconnectBtn.disabled = false;
             this.setStatus("已连接", "connected");
+            this.log("连接成功");
         } catch (err) {
+            const message = err.name ? this.translateMediaError(err) : (err.message || "连接失败");
             console.error(err);
-            this.setStatus(err.message || "连接失败", "error");
+            this.log("连接失败: " + message);
+            this.setStatus(message, "error");
             this.els.connectBtn.disabled = false;
             await this.cleanup();
         }
@@ -152,19 +217,21 @@ class PhoneCamWeb {
     connectSignaling() {
         return new Promise((resolve, reject) => {
             const wsUrl = `${this.serverUrl}/ws/${this.roomId}`;
+            this.log("连接信令服务器: " + wsUrl);
             this.ws = new WebSocket(wsUrl);
 
             this.ws.onopen = () => {
-                console.log("WebSocket connected:", wsUrl);
+                this.log("WebSocket 已连接");
                 resolve();
             };
 
             this.ws.onerror = (err) => {
-                console.error("WebSocket error:", err);
+                this.log("WebSocket 错误: " + JSON.stringify(err));
                 reject(new Error("无法连接信令服务器"));
             };
 
             this.ws.onclose = () => {
+                this.log("WebSocket 已关闭");
                 if (this.connected) {
                     this.setStatus("连接已断开", "error");
                     this.cleanup();
@@ -174,6 +241,7 @@ class PhoneCamWeb {
             this.ws.onmessage = (event) => {
                 try {
                     const msg = JSON.parse(event.data);
+                    this.log("收到信令: " + msg.type);
                     this.handleSignalingMessage(msg);
                 } catch (err) {
                     console.error("Invalid signaling message:", event.data);
@@ -199,7 +267,7 @@ class PhoneCamWeb {
         };
 
         this.pc.onconnectionstatechange = () => {
-            console.log("PeerConnection state:", this.pc.connectionState);
+            this.log("PeerConnection 状态: " + this.pc.connectionState);
             if (this.pc.connectionState === "connected") {
                 this.setStatus("WebRTC 已连接", "connected");
             } else if (["failed", "disconnected", "closed"].includes(this.pc.connectionState)) {
@@ -214,6 +282,7 @@ class PhoneCamWeb {
         const offer = await this.pc.createOffer();
         await this.pc.setLocalDescription(offer);
         this.sendSignaling({ type: "offer", sdp: offer.sdp });
+        this.log("已发送 offer");
     }
 
     async handleSignalingMessage(msg) {
