@@ -11,5 +11,7 @@
         <string>audio</string>
         <string>voip</string>
     </array>
+    <key>UIRequiresFullScreen</key>
+    <true/>
 </dict>
 </plist>
