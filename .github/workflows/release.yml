@@ -12,10 +12,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Package signaling server
+      - name: Package signaling server + web client
         run: |
-          cd signaling
+          mkdir -p signaling-server/signaling
+          cp -r signaling/*.py signaling/requirements.txt signaling-server/signaling/
+          cp -r web signaling-server/web
+          cd signaling-server
           zip -r ../signaling-server.zip .
+
+      - name: Package web client only
+        run: |
+          zip -r web-client.zip web
 
       - name: Package desktop client
         run: |
@@ -28,6 +35,7 @@ jobs:
           name: server-artifacts
           path: |
             signaling-server.zip
+            web-client.zip
             desktop-client.zip
           if-no-files-found: error
 
