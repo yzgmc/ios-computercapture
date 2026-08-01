@@ -46,7 +46,7 @@ class CaptureManager: NSObject, ObservableObject {
     private let audioSource: RTCAudioSource
     private let factory: RTCPeerConnectionFactory
 
-    init() {
+    override init() {
         let encoderFactory = RTCDefaultVideoEncoderFactory()
         let decoderFactory = RTCDefaultVideoDecoderFactory()
         factory = RTCPeerConnectionFactory(encoderFactory: encoderFactory,
