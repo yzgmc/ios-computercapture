@@ -1,4 +1,7 @@
 name: PhoneCam
+options:
+  xcodeVersion: "15.0"
+  createIntermediateGroups: true
 targets:
   PhoneCam:
     type: application
@@ -15,6 +18,8 @@ targets:
         CODE_SIGNING_ALLOWED: NO
         SWIFT_VERSION: "5.9"
         TARGETED_DEVICE_FAMILY: "1,2"
+        CLANG_ENABLE_MODULES: YES
+        SWIFT_OPTIMIZATION_LEVEL: "-Onone"
       configs:
         Debug:
           CODE_SIGN_IDENTITY: ""
@@ -23,3 +28,8 @@ targets:
     dependencies:
       - framework: Pods_PhoneCam.framework
         implicit: true
+schemes:
+  PhoneCam:
+    build:
+      targets:
+        PhoneCam: all

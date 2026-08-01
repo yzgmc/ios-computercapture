@@ -30,15 +30,27 @@ jobs:
         working-directory: ios
         run: xcodegen generate
 
+      - name: Inspect generated project
+        working-directory: ios
+        run: |
+          ls -la
+          ls -la PhoneCam.xcodeproj/xcshareddata/xcschemes/ || true
+
       - name: Install CocoaPods dependencies
         working-directory: ios
         run: |
           gem install cocoapods
           pod install --repo-update
 
+      - name: Inspect workspace schemes
+        working-directory: ios
+        run: |
+          xcodebuild -workspace PhoneCam.xcworkspace -list
+
       - name: Build iOS app
         working-directory: ios
         run: |
+          set -o pipefail
           xcodebuild clean build \
             -workspace PhoneCam.xcworkspace \
             -scheme PhoneCam \
@@ -51,6 +63,7 @@ jobs:
       - name: Archive iOS app
         working-directory: ios
         run: |
+          set -o pipefail
           xcodebuild archive \
             -workspace PhoneCam.xcworkspace \
             -scheme PhoneCam \
