@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#000000">
+    <link rel="manifest" href="/manifest.json">
+    <link rel="apple-touch-icon" href="/icon.svg">
+    <link rel="stylesheet" href="/style.css">
+    <title>PhoneCam</title>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>PhoneCam</h1>
+            <div id="status" class="status">未连接</div>
+        </header>
+
+        <div class="preview-wrapper">
+            <video id="localVideo" autoplay playsinline muted></video>
+            <div id="placeholder" class="placeholder">点击连接开始预览</div>
+        </div>
+
+        <div class="controls">
+            <div class="field">
+                <label for="serverUrl">信令服务器</label>
+                <input type="text" id="serverUrl" placeholder="ws://192.168.1.x:8080">
+            </div>
+
+            <div class="field">
+                <label for="roomId">房间号</label>
+                <input type="text" id="roomId" value="room1">
+            </div>
+
+            <div class="field">
+                <label for="resolution">分辨率</label>
+                <select id="resolution">
+                    <option value="1080">1080p</option>
+                    <option value="720" selected>720p</option>
+                    <option value="480">480p</option>
+                    <option value="240">240p</option>
+                </select>
+            </div>
+
+            <div class="field">
+                <label for="fps">帧率 <span id="fpsValue">30</span> fps</label>
+                <input type="range" id="fps" min="15" max="60" value="30">
+            </div>
+
+            <div class="field">
+                <label for="volume">音量 <span id="volumeValue">80</span>%</label>
+                <input type="range" id="volume" min="0" max="100" value="80">
+            </div>
+
+            <button id="connectBtn" class="btn-primary">连接</button>
+            <button id="disconnectBtn" class="btn-secondary" disabled>断开</button>
+        </div>
+    </div>
+
+    <script src="/app.js"></script>
+</body>
+</html>

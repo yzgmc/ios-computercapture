@@ -45,3 +45,7 @@ DerivedData/
 
 # PyInstaller
 *.spec
+
+# Self-signed HTTPS certificates
+signaling/cert.pem
+signaling/key.pem
