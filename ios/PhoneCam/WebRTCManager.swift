@@ -98,7 +98,7 @@ class WebRTCManager: NSObject, ObservableObject {
             let iceCandidate = RTCIceCandidate(sdp: candidate,
                                                sdpMLineIndex: sdpMLineIndex,
                                                sdpMid: sdpMid)
-            peerConnection?.add(iceCandidate)
+            try? peerConnection?.add(iceCandidate)
         }
     }
 
@@ -152,7 +152,7 @@ extension WebRTCManager: RTCPeerConnectionDelegate {
                                     didOpen dataChannel: RTCDataChannel) {}
 }
 
-actor SignalingClient {
+class SignalingClient: NSObject {
     private let url: String
     private let roomID: String
     private var webSocketTask: URLSessionWebSocketTask?
@@ -161,6 +161,7 @@ actor SignalingClient {
     init(url: String, roomID: String) {
         self.url = url
         self.roomID = roomID
+        super.init()
     }
 
     func connect() {
@@ -173,16 +174,17 @@ actor SignalingClient {
 
     private func receiveMessage() {
         webSocketTask?.receive { [weak self] result in
+            guard let self = self else { return }
             switch result {
             case .success(let message):
                 if case .string(let text) = message,
                    let data = text.data(using: .utf8),
                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                    Task { @MainActor [weak self] in
-                        self?.onMessage?(json)
+                    DispatchQueue.main.async {
+                        self.onMessage?(json)
                     }
                 }
-                self?.receiveMessage()
+                self.receiveMessage()
             case .failure(let error):
                 print("WebSocket error: \(error)")
             }
