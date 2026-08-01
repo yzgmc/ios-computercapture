@@ -100,7 +100,7 @@ jobs:
           xcodebuild clean archive \
             -workspace PhoneCam.xcworkspace \
             -scheme PhoneCam \
-            -destination 'generic/platform=iOS' \
+            -sdk iphoneos \
             -archivePath $PWD/build/PhoneCam.xcarchive \
             PRODUCT_BUNDLE_IDENTIFIER=com.yzgmc.phonecam \
             DEVELOPMENT_TEAM=$APPLE_TEAM_ID \
