@@ -114,9 +114,7 @@ struct CameraPreviewView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> UIView {
         let view = UIView()
-        Task {
-            await captureManager.setupPreview(in: view)
-        }
+        captureManager.setupPreview(in: view)
         return view
     }
 

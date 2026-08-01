@@ -105,7 +105,7 @@ class WebRTCManager: NSObject, ObservableObject {
     func disconnect() async {
         peerConnection?.close()
         peerConnection = nil
-        await signalingClient?.disconnect()
+        signalingClient?.disconnect()
         signalingClient = nil
         statusMessage = "已断开"
     }

@@ -26,7 +26,6 @@ enum CaptureResolution: CaseIterable, Identifiable {
     }
 }
 
-@MainActor
 class CaptureManager: NSObject, ObservableObject {
     @Published var selectedResolution: CaptureResolution = .p720
     @Published var fps: Int = 30
@@ -34,15 +33,14 @@ class CaptureManager: NSObject, ObservableObject {
 
     private let captureSession = AVCaptureSession()
     private var videoDeviceInput: AVCaptureDeviceInput?
-    private var audioDeviceInput: AVCaptureDeviceInput?
     private var videoOutput: AVCaptureVideoDataOutput?
-    private var audioOutput: AVCaptureAudioDataOutput?
     private var previewLayer: AVCaptureVideoPreviewLayer?
 
     var videoTrack: RTCVideoTrack?
     var audioTrack: RTCAudioTrack?
 
     private let videoSource: RTCVideoSource
+    private let videoCapturer: RTCVideoCapturer
     private let audioSource: RTCAudioSource
     private let factory: RTCPeerConnectionFactory
 
@@ -52,6 +50,7 @@ class CaptureManager: NSObject, ObservableObject {
         factory = RTCPeerConnectionFactory(encoderFactory: encoderFactory,
                                            decoderFactory: decoderFactory)
         videoSource = factory.videoSource()
+        videoCapturer = RTCVideoCapturer(delegate: videoSource)
         audioSource = factory.audioSource(with: nil)
         super.init()
     }
@@ -72,7 +71,6 @@ class CaptureManager: NSObject, ObservableObject {
 
         captureSession.beginConfiguration()
 
-        // 视频输入
         do {
             captureSession.sessionPreset = .high
 
@@ -85,7 +83,6 @@ class CaptureManager: NSObject, ObservableObject {
 
             try videoDevice.lockForConfiguration()
             let dimensions = selectedResolution.size
-            // 设置分辨率，实际可用格式需遍历 device.formats
             if let format = videoDevice.formats.first(where: {
                 let desc = $0.formatDescription
                 let size = CMVideoFormatDescriptionGetDimensions(desc)
@@ -113,42 +110,19 @@ class CaptureManager: NSObject, ObservableObject {
             print("视频配置失败: \(error)")
         }
 
-        // 音频输入
-        do {
-            guard let audioDevice = AVCaptureDevice.default(for: .audio) else {
-                print("无法获取麦克风")
-                return
-            }
-            let audioInput = try AVCaptureDeviceInput(device: audioDevice)
-            if captureSession.canAddInput(audioInput) {
-                captureSession.addInput(audioInput)
-                audioDeviceInput = audioInput
-            }
-
-            let audioOutput = AVCaptureAudioDataOutput()
-            audioOutput.setSampleBufferDelegate(self, queue: DispatchQueue(label: "audioQueue"))
-            if captureSession.canAddOutput(audioOutput) {
-                captureSession.addOutput(audioOutput)
-                self.audioOutput = audioOutput
-            }
-        } catch {
-            print("音频配置失败: \(error)")
-        }
-
         captureSession.commitConfiguration()
 
-        // 创建 WebRTC track
         videoTrack = factory.videoTrack(with: videoSource, trackId: "video0")
         audioTrack = factory.audioTrack(with: audioSource, trackId: "audio0")
 
-        DispatchQueue.global(qos: .userInitiated).async {
-            self.captureSession.startRunning()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.captureSession.startRunning()
         }
     }
 
     func stopCapture() async {
-        DispatchQueue.global(qos: .userInitiated).async {
-            self.captureSession.stopRunning()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.captureSession.stopRunning()
         }
     }
 
@@ -159,48 +133,15 @@ class CaptureManager: NSObject, ObservableObject {
     }
 }
 
-extension CaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate,
-                          AVCaptureAudioDataOutputSampleBufferDelegate {
+extension CaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate {
 
-    nonisolated func captureOutput(_ output: AVCaptureOutput,
-                                   didOutput sampleBuffer: CMSampleBuffer,
-                                   from connection: AVCaptureConnection) {
-        if output == videoOutput {
-            guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-            let rtcFrame = RTCVideoFrame(buffer: RTCCVPixelBuffer(pixelBuffer: pixelBuffer),
-                                         rotation: ._0,
-                                         timeStampNs: Int64(CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer)) * 1_000_000_000))
-            Task { @MainActor in
-                self.videoSource.capturer(self.videoSource as! RTCVideoCapturer, didCapture: rtcFrame)
-            }
-        } else if output == audioOutput {
-            // 将 CMSampleBuffer 转换为 RTCAudioFrame
-            guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
-            var audioBufferList = AudioBufferList()
-            var dataLength: Int = 0
-            CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-                sampleBuffer,
-                bufferListSizeNeededOut: &dataLength,
-                bufferListOut: &audioBufferList,
-                bufferListSize: MemoryLayout<AudioBufferList>.size,
-                blockBufferAllocator: nil,
-                blockBufferMemoryAllocator: nil,
-                flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
-                blockBufferOut: nil
-            )
-
-            let audioBuffer = audioBufferList.mBuffers
-            guard let data = audioBuffer.mData else { return }
-            let frame = RTCAudioFrame(buffer: data,
-                                      bytesPerSample: audioBuffer.mBytesPerChannel,
-                                      sampleCount: audioBuffer.mDataByteSize / audioBuffer.mBytesPerChannel,
-                                      channels: audioBuffer.mNumberChannels,
-                                      sampleRate: 48000,
-                                      absoluteCaptureTimestamp: Int64(CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer)) * 1_000_000_000))
-
-            Task { @MainActor in
-                self.audioSource.capturer(self.audioSource as! RTCAudioCapturer, didCapture: frame)
-            }
-        }
+    func captureOutput(_ output: AVCaptureOutput,
+                       didOutput sampleBuffer: CMSampleBuffer,
+                       from connection: AVCaptureConnection) {
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let rtcFrame = RTCVideoFrame(buffer: RTCCVPixelBuffer(pixelBuffer: pixelBuffer),
+                                     rotation: ._0,
+                                     timeStampNs: Int64(CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer)) * 1_000_000_000))
+        videoSource.capturer(videoCapturer, didCapture: rtcFrame)
     }
 }
