@@ -46,13 +46,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Select Xcode version
-        run: sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer
-
-      - name: Install iOS platform
-        run: |
-          # 尝试下载 iOS 平台；如果下载服务不可用则继续，真机归档不一定需要完整 runtime
-          sudo xcodebuild -downloadPlatform iOS || true
-          xcodebuild -showsdks | grep iphoneos || true
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
 
       - name: Install xcodegen
         run: brew install xcodegen
