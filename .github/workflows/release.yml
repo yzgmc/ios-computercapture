@@ -49,7 +49,8 @@ jobs:
         run: sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer
 
       - name: Install iOS platform
-        run: xcodebuild -downloadPlatform iOS
+        run: |
+          xcodebuild -downloadPlatform iOS || echo "iOS platform may already be installed, continuing..."
 
       - name: Install xcodegen
         run: brew install xcodegen
