@@ -50,8 +50,9 @@ jobs:
 
       - name: Install iOS platform
         run: |
-          sudo xcodebuild -downloadPlatform iOS
-          xcodebuild -showsdks | grep iphoneos
+          # 尝试下载 iOS 平台；如果下载服务不可用则继续，真机归档不一定需要完整 runtime
+          sudo xcodebuild -downloadPlatform iOS || true
+          xcodebuild -showsdks | grep iphoneos || true
 
       - name: Install xcodegen
         run: brew install xcodegen
@@ -99,7 +100,6 @@ jobs:
           xcodebuild clean archive \
             -workspace PhoneCam.xcworkspace \
             -scheme PhoneCam \
-            -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -archivePath $PWD/build/PhoneCam.xcarchive \
             PRODUCT_BUNDLE_IDENTIFIER=com.yzgmc.phonecam \
