@@ -119,9 +119,6 @@ jobs:
             -archivePath $PWD/build/PhoneCam.xcarchive \
             PRODUCT_BUNDLE_IDENTIFIER=com.yzg.phonecam \
             DEVELOPMENT_TEAM=$APPLE_TEAM_ID \
-            CODE_SIGN_STYLE=Manual \
-            CODE_SIGN_IDENTITY="$CERTIFICATE_NAME" \
-            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
             CODE_SIGNING_ALLOWED=YES \
             CODE_SIGNING_REQUIRED=YES \
             | xcbeautify --renderer github-actions

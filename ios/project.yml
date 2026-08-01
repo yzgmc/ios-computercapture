@@ -13,18 +13,15 @@ targets:
       base:
         INFOPLIST_FILE: PhoneCam/Info.plist
         PRODUCT_BUNDLE_IDENTIFIER: com.yzg.phonecam
-        CODE_SIGN_IDENTITY: ""
-        CODE_SIGNING_REQUIRED: NO
-        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "iPhone Developer"
+        PROVISIONING_PROFILE_SPECIFIER: phonecam
+        CODE_SIGNING_REQUIRED: YES
+        CODE_SIGNING_ALLOWED: YES
         SWIFT_VERSION: "5.9"
         TARGETED_DEVICE_FAMILY: "1,2"
         CLANG_ENABLE_MODULES: YES
         SWIFT_OPTIMIZATION_LEVEL: "-Onone"
-      configs:
-        Debug:
-          CODE_SIGN_IDENTITY: ""
-        Release:
-          CODE_SIGN_IDENTITY: ""
     dependencies:
       - framework: Pods_PhoneCam.framework
         implicit: true
