@@ -27,7 +27,7 @@ enum CaptureResolution: CaseIterable, Identifiable {
 }
 
 @MainActor
-class CaptureManager: ObservableObject {
+class CaptureManager: NSObject, ObservableObject {
     @Published var selectedResolution: CaptureResolution = .p720
     @Published var fps: Int = 30
     @Published var volume: Double = 0.8
@@ -53,6 +53,7 @@ class CaptureManager: ObservableObject {
                                            decoderFactory: decoderFactory)
         videoSource = factory.videoSource()
         audioSource = factory.audioSource(with: nil)
+        super.init()
     }
 
     func setupPreview(in view: UIView) {

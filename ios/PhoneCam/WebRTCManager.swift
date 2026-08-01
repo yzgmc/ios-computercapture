@@ -2,7 +2,7 @@ import Foundation
 import WebRTC
 
 @MainActor
-class WebRTCManager: ObservableObject {
+class WebRTCManager: NSObject, ObservableObject {
     @Published var statusMessage = "未连接"
 
     private var peerConnection: RTCPeerConnection?
@@ -13,11 +13,12 @@ class WebRTCManager: ObservableObject {
         RTCIceServer(urlStrings: ["stun:stun.l.google.com:19302"])
     ]
 
-    init() {
+    override init() {
         let encoderFactory = RTCDefaultVideoEncoderFactory()
         let decoderFactory = RTCDefaultVideoDecoderFactory()
         factory = RTCPeerConnectionFactory(encoderFactory: encoderFactory,
                                            decoderFactory: decoderFactory)
+        super.init()
     }
 
     func connect(signalingURL: String, roomID: String) async {
@@ -115,6 +116,9 @@ extension WebRTCManager: RTCPeerConnectionDelegate {
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didAdd stream: RTCMediaStream) {}
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didRemove stream: RTCMediaStream) {}
     nonisolated func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {}
+
+    nonisolated func peerConnection(_ peerConnection: RTCPeerConnection,
+                                    didChange newState: RTCIceGatheringState) {}
 
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection,
                                     didChange newState: RTCIceConnectionState) {
