@@ -9,6 +9,8 @@ targets:
     deploymentTarget: "15.0"
     sources:
       - PhoneCam
+    resources:
+      - PhoneCam/Assets.car
     settings:
       base:
         INFOPLIST_FILE: PhoneCam/Info.plist
