@@ -22,8 +22,14 @@ def main():
     phone_cam_app = PhoneCamApp()
     phone_cam_app.show()
 
+    # 启动后异步拉起内嵌信令服务器 + 自动连接
+    asyncio.ensure_future(phone_cam_app.start())
+
     # 应用退出时清理资源
-    app.aboutToQuit.connect(lambda: phone_cam_app.discovery.stop())
+    async def _on_quit():
+        await phone_cam_app.shutdown()
+
+    app.aboutToQuit.connect(lambda: asyncio.ensure_future(_on_quit()))
 
     with loop:
         loop.run_forever()

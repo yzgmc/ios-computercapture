@@ -87,6 +87,23 @@ class WebRTCPeer:
                     "sdpMLineIndex": candidate.sdpMLineIndex,
                 }))
 
+        @self.pc.on("icegatheringstatechange")
+        async def on_icegatheringstatechange():
+            logger.info("ICE gathering state: %s", self.pc.iceGatheringState)
+
+        @self.pc.on("iceconnectionstatechange")
+        async def on_iceconnectionstatechange():
+            ice_state = self.pc.iceConnectionState
+            logger.info("ICE connection state: %s", ice_state)
+            # ICE 状态变化往往比 connectionState 更早反映连通性
+            if self.on_connection_state_change:
+                if ice_state in ("completed", "connected"):
+                    self.on_connection_state_change("connected")
+                elif ice_state == "checking":
+                    self.on_connection_state_change("connecting")
+                elif ice_state in ("disconnected", "failed", "closed"):
+                    self.on_connection_state_change(ice_state)
+
         @self.pc.on("connectionstatechange")
         async def on_connectionstatechange():
             state = self.pc.connectionState
@@ -102,29 +119,35 @@ class WebRTCPeer:
         msg_type = message.get("type")
 
         if msg_type == "offer":
-            logger.info("Received offer")
+            logger.info("Received offer, sdp length=%d", len(message.get("sdp", "")))
             await self.pc.setRemoteDescription(
                 RTCSessionDescription(sdp=message["sdp"], type="offer")
             )
+            logger.info("Remote description set, creating answer...")
             answer = await self.pc.createAnswer()
             await self.pc.setLocalDescription(answer)
+            logger.info("Local description set, ICE gathering: %s", self.pc.iceGatheringState)
             if self.send_signaling:
                 await self.send_signaling({
                     "type": "answer",
                     "sdp": self.pc.localDescription.sdp,
                 })
-            logger.info("Sent answer")
+            logger.info("Sent answer, sdp length=%d", len(self.pc.localDescription.sdp))
         elif msg_type == "answer":
-            logger.info("Received answer")
+            logger.info("Received answer, sdp length=%d", len(message.get("sdp", "")))
             await self.pc.setRemoteDescription(
                 RTCSessionDescription(sdp=message["sdp"], type="answer")
             )
+            logger.info("Remote answer description set")
         elif msg_type == "ice":
-            logger.debug("Received ICE candidate")
-            candidate = candidate_from_sdp(message["candidate"])
-            candidate.sdpMid = message.get("sdpMid")
-            candidate.sdpMLineIndex = message.get("sdpMLineIndex")
-            await self.pc.addIceCandidate(candidate)
+            logger.info("Received ICE candidate: %s", message.get("candidate"))
+            try:
+                candidate = candidate_from_sdp(message["candidate"])
+                candidate.sdpMid = message.get("sdpMid")
+                candidate.sdpMLineIndex = message.get("sdpMLineIndex")
+                await self.pc.addIceCandidate(candidate)
+            except Exception as e:
+                logger.error("Failed to add ICE candidate: %s", e)
 
     async def update_settings(self, settings: dict):
         # 通过 data channel 发送设置到 iOS 端

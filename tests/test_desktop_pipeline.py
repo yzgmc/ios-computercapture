@@ -18,7 +18,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "desktop", "src"))
 from webrtc.peer import WebRTCPeer
-from webrtc.signaling import SignalingClient
+from signaling import SignalingClient
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

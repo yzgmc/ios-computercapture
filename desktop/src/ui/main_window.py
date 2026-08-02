@@ -48,15 +48,16 @@ class MainWindow(QMainWindow):
         connection_group = QGroupBox("连接设置")
         connection_layout = QVBoxLayout(connection_group)
 
-        connection_layout.addWidget(QLabel("信令服务器地址"))
-        self.server_input = QLineEdit("ws://localhost:8080")
+        connection_layout.addWidget(QLabel("信令服务器地址（iPhone 连入此地址）"))
+        self.server_input = QLineEdit("ws://0.0.0.0:8080")
+        self.server_input.setReadOnly(True)
         connection_layout.addWidget(self.server_input)
 
         connection_layout.addWidget(QLabel("房间 ID"))
         self.room_input = QLineEdit("room1")
         connection_layout.addWidget(self.room_input)
 
-        self.connect_button = QPushButton("连接")
+        self.connect_button = QPushButton("重新连接")
         self.disconnect_button = QPushButton("断开")
         self.disconnect_button.setEnabled(False)
         connection_layout.addWidget(self.connect_button)
@@ -214,3 +215,19 @@ class MainWindow(QMainWindow):
 
     def set_status(self, message: str):
         self.status_bar.showMessage(message)
+
+    def set_server_address(self, address: str):
+        """显示当前内嵌信令服务器对外地址，供 iPhone 输入连接。"""
+        self.server_input.setText(address)
+
+    def set_connect_state(self, connected: bool, auto_mode: bool = False):
+        """根据连接状态更新按钮可用性。
+
+        auto_mode=True 表示由内嵌服务器自动连接，此时连接按钮文案为"重新连接"。
+        """
+        if connected:
+            self.connect_button.setEnabled(False)
+            self.disconnect_button.setEnabled(True)
+        else:
+            self.connect_button.setEnabled(True)
+            self.disconnect_button.setEnabled(False)

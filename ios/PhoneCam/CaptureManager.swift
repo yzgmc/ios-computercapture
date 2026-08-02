@@ -34,6 +34,8 @@ class CaptureManager: NSObject, ObservableObject {
     @Published var selectedResolution: CaptureResolution = .p720
     @Published var fps: Int = 30
     @Published var volume: Double = 0.8
+    // 摄像头实际输出尺寸（由 activeFormat 决定），用于预览按真实比例渲染
+    @Published var actualCaptureSize: CGSize = CGSize(width: 1280, height: 720)
 
     private let captureSession = AVCaptureSession()
     private var videoDeviceInput: AVCaptureDeviceInput?
@@ -125,9 +127,9 @@ class CaptureManager: NSObject, ObservableObject {
                 guard CGFloat(size.width) >= dimensions.width && CGFloat(size.height) >= dimensions.height else { return nil }
                 return (format, size)
             }
+            var selectedFormat: AVCaptureDevice.Format?
             if let bestFormat = matchingFormats.min(by: { $0.1.width * $0.1.height < $1.1.width * $1.1.height }) {
-                videoDevice.activeFormat = bestFormat.0
-                captureSession.sessionPreset = .inputPriority
+                selectedFormat = bestFormat.0
                 print("Selected format: \(bestFormat.1.width)x\(bestFormat.1.height)")
             } else {
                 // 没有完全匹配目标的分辨率，使用设备支持的最高格式
@@ -136,14 +138,34 @@ class CaptureManager: NSObject, ObservableObject {
                     let s2 = CMVideoFormatDescriptionGetDimensions($1.formatDescription)
                     return s1.width * s1.height < s2.width * s2.height
                 }) {
-                    videoDevice.activeFormat = highestFormat
-                    captureSession.sessionPreset = .inputPriority
+                    selectedFormat = highestFormat
                     let size = CMVideoFormatDescriptionGetDimensions(highestFormat.formatDescription)
                     print("Fallback to highest format: \(size.width)x\(size.height)")
                 }
             }
-            videoDevice.activeVideoMinFrameDuration = CMTime(value: 1, timescale: CMTimeScale(fps))
-            videoDevice.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: CMTimeScale(fps))
+
+            if let format = selectedFormat {
+                videoDevice.activeFormat = format
+                captureSession.sessionPreset = .inputPriority
+
+                // 记录实际采集尺寸，供 UI 按真实比例显示预览
+                let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+                await MainActor.run {
+                    self.actualCaptureSize = CGSize(width: CGFloat(dims.width), height: CGFloat(dims.height))
+                }
+
+                // 将期望 fps 钳制到当前 activeFormat 支持的帧率范围，避免 4K/2K + 60fps 崩溃
+                let clampedFps = Self.clampFps(Double(fps), format: format)
+                if clampedFps != Double(fps) {
+                    print("FPS clamped: requested \(fps) -> supported \(clampedFps)")
+                    await MainActor.run {
+                        self.fps = Int(clampedFps)
+                    }
+                }
+                let frameDuration = CMTime(value: 1, timescale: CMTimeScale(clampedFps))
+                videoDevice.activeVideoMinFrameDuration = frameDuration
+                videoDevice.activeVideoMaxFrameDuration = frameDuration
+            }
             videoDevice.unlockForConfiguration()
 
             let videoInput = try AVCaptureDeviceInput(device: videoDevice)
@@ -182,6 +204,30 @@ class CaptureManager: NSObject, ObservableObject {
         let cameraStatus = await AVCaptureDevice.requestAccess(for: .video)
         let audioStatus = await AVCaptureDevice.requestAccess(for: .audio)
         return cameraStatus && audioStatus
+    }
+
+    /// 将期望帧率钳制到指定格式支持的帧率范围。
+    /// 高分辨率（4K/2K）通常不支持 60fps，强行设置会导致采集崩溃。
+    static func clampFps(_ requestedFps: Double, format: AVCaptureDevice.Format) -> Double {
+        let ranges = format.videoSupportedFrameRateRanges
+        // 取所有范围并集内最接近期望值的可用帧率
+        var supported = requestedFps
+        var found = false
+        for range in ranges {
+            let minFps = range.minFrameRate
+            let maxFps = range.maxFrameRate
+            if requestedFps >= minFps && requestedFps <= maxFps {
+                return requestedFps
+            }
+            // 记录该范围的最大可用值作为候选
+            if !found || maxFps < supported {
+                supported = maxFps
+                found = true
+            }
+        }
+        // 若期望帧率高于所有范围上限，返回最大支持值；否则兜底 30
+        if !found { return 30.0 }
+        return min(supported, max(requestedFps, 15.0))
     }
 }
 

@@ -1,18 +1,22 @@
 import asyncio
 import logging
+import socket
 
 from PyQt6.QtCore import QObject, pyqtSignal
 from qasync import asyncSlot
 
 from ui.main_window import MainWindow
 from webrtc.peer import WebRTCPeer
-from webrtc.signaling import SignalingClient
+from signaling import EmbeddedSignalingServer, SignalingClient
 from capture.virtual_device import (
     VirtualCameraOutput, VirtualAudioOutput, find_default_virtual_audio_device
 )
 from discovery.service import DiscoveryService
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_PORT = 8080
+DEFAULT_ROOM = "room1"
 
 
 class PhoneCamApp(QObject):
@@ -32,19 +36,22 @@ class PhoneCamApp(QObject):
         self.status_changed.connect(self.window.set_status)
         self.video_frame_received.connect(self.window.update_video_frame)
 
+        # 内嵌信令服务器，随桌面客户端启动
+        self.signaling_server = EmbeddedSignalingServer(host="0.0.0.0", port=DEFAULT_PORT)
+        # 信令客户端，连到自己内嵌的服务器
         self.signaling = SignalingClient()
         self.peer = WebRTCPeer()
-        self.discovery = DiscoveryService(port=8080)
+        self.discovery = DiscoveryService(port=DEFAULT_PORT)
 
         self.virtual_camera = VirtualCameraOutput()
         self.virtual_audio = VirtualAudioOutput(
             device_index=find_default_virtual_audio_device()
         )
 
-        self._pending_messages: list[dict] = []
+        self._pending_messages: list[dict] | None = []
+        self._auto_started = False
 
         self._setup_peer_signals()
-        self._start_discovery()
 
     def _setup_peer_signals(self):
         self.peer.on_video_frame = self._on_video_frame
@@ -60,23 +67,70 @@ class PhoneCamApp(QObject):
         self.audio_frame_received.emit(frame)
         self.virtual_audio.send_frame(frame)
 
-    def _start_discovery(self):
+    def _get_local_ip(self) -> str:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(0)
+            try:
+                s.connect(("10.254.254.254", 1))
+                ip = s.getsockname()[0]
+            except Exception:
+                ip = "127.0.0.1"
+            finally:
+                s.close()
+            return ip
+        except Exception:
+            return "127.0.0.1"
+
+    async def start(self):
+        """应用启动时自动拉起信令服务器、mDNS 发现并进入等待连接状态。"""
+        # 1. 启动内嵌信令服务器
+        try:
+            await self.signaling_server.start()
+        except Exception as e:
+            logger.error("Failed to start embedded signaling server: %s", e)
+            self.status_changed.emit(f"信令服务器启动失败: {e}")
+            return
+
+        local_ip = self._get_local_ip()
+        ws_url = f"ws://{local_ip}:{DEFAULT_PORT}"
+        self.window.set_server_address(ws_url)
+        self.status_changed.emit(f"信令服务器已启动: {ws_url}")
+        logger.info("Local signaling URL: %s", ws_url)
+
+        # 2. 启动 mDNS 发现
         try:
             self.discovery.start()
-            self.status_changed.emit("设备发现服务已启动")
         except Exception as e:
             logger.warning("Failed to start discovery service: %s", e)
+
+        # 3. 自动建立 PeerConnection 并连入本地信令房间，等待 iOS offer
+        await self._auto_connect_local(ws_url, DEFAULT_ROOM)
+
+    async def _auto_connect_local(self, ws_url: str, room_id: str):
+        """自动连接本地信令服务器并就绪 PeerConnection。"""
+        try:
+            await self.peer.start(self.signaling.send)
+            self.signaling.on_message = self._on_signaling_message
+            await self.signaling.connect(ws_url, room_id)
+            self._auto_started = True
+            self.window.set_connect_state(connected=False, auto_mode=True)
+            self.status_changed.emit("等待 iPhone 连接...")
+            await self._flush_pending_messages()
+        except Exception as e:
+            logger.error("Auto connect failed: %s", e)
+            self.status_changed.emit(f"自动连接失败: {e}")
 
     def show(self):
         self.window.show()
 
     @asyncSlot(str, str)
     async def _on_connect_requested(self, signaling_url: str, room_id: str):
+        """手动连接（可指向远程信令服务器或重连本地）。"""
         logger.info("Connecting to %s / room %s", signaling_url, room_id)
         self.status_changed.emit("正在连接信令服务器...")
         self._pending_messages = []
         try:
-            # 先创建 PeerConnection 并设置消息处理，避免 iOS offer 到达时尚未就绪
             await self.peer.start(self.signaling.send)
             self.signaling.on_message = self._on_signaling_message
             await self.signaling.connect(signaling_url, room_id)
@@ -94,6 +148,7 @@ class PhoneCamApp(QObject):
         await self.peer.stop()
         await self.signaling.disconnect()
         self.status_changed.emit("已断开连接")
+        self.window.set_connect_state(connected=False, auto_mode=self._auto_started)
 
     @asyncSlot(dict)
     async def _on_settings_changed(self, settings: dict):
@@ -135,8 +190,40 @@ class PhoneCamApp(QObject):
     async def _flush_pending_messages(self):
         pending = self._pending_messages
         self._pending_messages = None
-        for message in pending:
-            await self.peer.handle_signaling_message(message)
+        if pending:
+            for message in pending:
+                await self.peer.handle_signaling_message(message)
 
     def _on_connection_state_change(self, state: str):
-        self.status_changed.emit(f"连接状态: {state}")
+        if state == "connected":
+            self.status_changed.emit("已连接，正在接收视频")
+            self.window.set_connect_state(connected=True, auto_mode=self._auto_started)
+        elif state in ("disconnected", "failed", "closed"):
+            self.status_changed.emit(f"连接{state}")
+            self.window.set_connect_state(connected=False, auto_mode=self._auto_started)
+        else:
+            self.status_changed.emit(f"连接状态: {state}")
+
+    async def shutdown(self):
+        """应用退出时清理所有资源。"""
+        try:
+            await self.peer.stop()
+        except Exception as e:
+            logger.warning("Peer stop error: %s", e)
+        try:
+            await self.signaling.disconnect()
+        except Exception as e:
+            logger.warning("Signaling disconnect error: %s", e)
+        try:
+            await self.signaling_server.stop()
+        except Exception as e:
+            logger.warning("Signaling server stop error: %s", e)
+        try:
+            self.discovery.stop()
+        except Exception as e:
+            logger.warning("Discovery stop error: %s", e)
+        try:
+            self.virtual_camera.disable()
+            self.virtual_audio.disable()
+        except Exception as e:
+            logger.warning("Virtual device disable error: %s", e)

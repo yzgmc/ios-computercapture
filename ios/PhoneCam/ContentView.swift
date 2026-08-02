@@ -72,17 +72,12 @@ struct ContentView: View {
                     .clipShape(Capsule())
             }
 
-            GeometryReader { cardGeometry in
-                CameraPreviewView(captureManager: captureManager)
-                    .frame(
-                        width: cardGeometry.size.width,
-                        height: previewHeight(width: cardGeometry.size.width,
-                                              screenHeight: geometry.size.height)
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            }
-            .aspectRatio(previewAspectRatio, contentMode: .fit)
-            .shadow(color: .black.opacity(0.08), radius: 8, x: 0, y: 4)
+            // 按摄像头实际输出比例渲染预览，撑满卡片宽度，高度由比例自然得出
+            CameraPreviewView(captureManager: captureManager)
+                .frame(maxWidth: .infinity)
+                .frame(height: previewHeight(for: geometry.size.width - 32))
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .shadow(color: .black.opacity(0.08), radius: 8, x: 0, y: 4)
         }
         .padding()
         .background(Color.cardBackground)
@@ -289,19 +284,22 @@ struct ContentView: View {
     }
 
     // MARK: - 响应式尺寸计算
+    // 使用摄像头实际输出尺寸计算比例，避免与预览层不匹配产生黑边/拉伸
     private var previewAspectRatio: CGFloat {
-        let size = captureManager.selectedResolution.size
+        let size = captureManager.actualCaptureSize
+        guard size.height > 0 else { return 16.0 / 9.0 }
         return size.width / size.height
     }
 
-    private func previewHeight(width: CGFloat, screenHeight: CGFloat) -> CGFloat {
-        let calculatedHeight = width / previewAspectRatio
-
-        // 在小屏/横屏设备上限制最大高度，避免内容被挤出
-        let maxHeightRatio: CGFloat = verticalSizeClass == .compact ? 0.45 : 0.38
+    /// 根据卡片可用宽度计算预览高度，按实际采集比例换算。
+    /// 不再硬性卡死在 0.38 屏高，而是允许预览占据更合理的空间。
+    private func previewHeight(for cardWidth: CGFloat) -> CGFloat {
+        let naturalHeight = cardWidth / previewAspectRatio
+        // 横屏时限制略紧，竖屏时放宽让预览成为界面主体
+        let maxHeightRatio: CGFloat = verticalSizeClass == .compact ? 0.55 : 0.62
+        let screenHeight = UIScreen.main.bounds.height
         let maxHeight = screenHeight * maxHeightRatio
-
-        return min(calculatedHeight, maxHeight)
+        return min(naturalHeight, maxHeight)
     }
 
     private var statusColor: Color {
