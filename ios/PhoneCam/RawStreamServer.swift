@@ -1,5 +1,7 @@
 import Foundation
 import Network
+import CoreMedia
+import Accelerate
 import CoreVideo
 
 /// 原画质无压缩视频传输：将采集到的 CVPixelBuffer 以 BGRA 像素通过 UDP 分片发送到桌面端。
