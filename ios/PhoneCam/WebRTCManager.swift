@@ -57,15 +57,6 @@ class WebRTCManager: NSObject, ObservableObject {
             peerConnection?.add(audioTrack, streamIds: ["stream0"])
         }
 
-        // 优先使用 H.264 硬件编码，画质与兼容性更好
-        if let videoTransceiver = peerConnection?.transceivers.first(where: { $0.mediaType == .video }) {
-            let h264Codecs = videoTransceiver.codecCapabilities.filter { $0.name == "H264" }
-            if !h264Codecs.isEmpty {
-                videoTransceiver.setCodecPreferences(h264Codecs)
-                print("Preferred H.264 codecs: \(h264Codecs.map { $0.name })")
-            }
-        }
-
         let offerConstraints = RTCMediaConstraints(mandatoryConstraints: [
             kRTCMediaConstraintsOfferToReceiveAudio: kRTCMediaConstraintsValueTrue,
             kRTCMediaConstraintsOfferToReceiveVideo: kRTCMediaConstraintsValueTrue,
