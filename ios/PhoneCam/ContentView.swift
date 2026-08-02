@@ -81,7 +81,7 @@ struct ContentView: View {
                     )
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
-            .aspectRatio(16 / 9, contentMode: .fit)
+            .aspectRatio(previewAspectRatio, contentMode: .fit)
             .shadow(color: .black.opacity(0.08), radius: 8, x: 0, y: 4)
         }
         .padding()
@@ -133,16 +133,42 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 16) {
             sectionHeader(icon: "slider.horizontal.3", title: "采集参数")
 
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 10) {
                 Text("分辨率")
                     .font(.subheadline)
                     .foregroundStyle(Color.secondaryText)
-                Picker("分辨率", selection: $captureManager.selectedResolution) {
-                    ForEach(CaptureResolution.allCases) { resolution in
-                        Text(resolution.label).tag(resolution)
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(CaptureResolution.allCases) { resolution in
+                            Button(action: {
+                                captureManager.selectedResolution = resolution
+                            }) {
+                                Text(resolution.label)
+                                    .font(.subheadline)
+                                    .fontWeight(.semibold)
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.8)
+                                    .foregroundStyle(
+                                        captureManager.selectedResolution == resolution
+                                            ? Color.white
+                                            : Color.primaryText
+                                    )
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 8)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                            .fill(
+                                                captureManager.selectedResolution == resolution
+                                                    ? Color.accentColor
+                                                    : Color(uiColor: UIColor.tertiarySystemFill)
+                                            )
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
                 }
-                .pickerStyle(.segmented)
             }
 
             Divider()
@@ -263,9 +289,13 @@ struct ContentView: View {
     }
 
     // MARK: - 响应式尺寸计算
+    private var previewAspectRatio: CGFloat {
+        let size = captureManager.selectedResolution.size
+        return size.width / size.height
+    }
+
     private func previewHeight(width: CGFloat, screenHeight: CGFloat) -> CGFloat {
-        let aspectRatio: CGFloat = 16.0 / 9.0
-        let calculatedHeight = width / aspectRatio
+        let calculatedHeight = width / previewAspectRatio
 
         // 在小屏/横屏设备上限制最大高度，避免内容被挤出
         let maxHeightRatio: CGFloat = verticalSizeClass == .compact ? 0.45 : 0.38

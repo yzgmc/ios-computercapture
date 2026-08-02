@@ -1,6 +1,7 @@
 import asyncio
 import logging
 
+import numpy as np
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
@@ -173,7 +174,18 @@ class MainWindow(QMainWindow):
         """frame 为 aiortc 的 VideoFrame"""
         try:
             import cv2
+            logger.debug("Updating UI with frame %dx%d", frame.width, frame.height)
             img = frame.to_ndarray(format="rgb24")
+
+            # 先按预览控件大小缩放，降低 2K/4K 帧的内存与 CPU 占用
+            label_w = max(self.video_label.width(), 320)
+            label_h = max(self.video_label.height(), 240)
+            if img.shape[1] > label_w or img.shape[0] > label_h:
+                scale = min(label_w / img.shape[1], label_h / img.shape[0])
+                new_w = max(int(img.shape[1] * scale), 1)
+                new_h = max(int(img.shape[0] * scale), 1)
+                img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
             flip_code = -1
             if self.flip_horizontal_checkbox.isChecked() and not self.flip_vertical_checkbox.isChecked():
                 flip_code = 1
@@ -185,6 +197,8 @@ class MainWindow(QMainWindow):
                 flip_code = None
             if flip_code is not None:
                 img = cv2.flip(img, flip_code)
+
+            img = np.ascontiguousarray(img)
             h, w, ch = img.shape
             bytes_per_line = ch * w
             qt_image = QImage(img.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)

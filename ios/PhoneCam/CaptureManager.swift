@@ -66,7 +66,7 @@ class CaptureManager: NSObject, ObservableObject {
 
     func setupPreview(in view: UIView) {
         let previewLayer = AVCaptureVideoPreviewLayer(session: captureSession)
-        previewLayer.videoGravity = .resizeAspectFill
+        previewLayer.videoGravity = .resizeAspect
         previewLayer.frame = view.bounds
         previewLayer.connection?.videoOrientation = currentVideoOrientation()
         view.layer.addSublayer(previewLayer)

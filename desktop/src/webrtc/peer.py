@@ -17,6 +17,7 @@ class _TrackReceiver:
         self.track = track
         self.callback = callback
         self._task: Optional[asyncio.Task] = None
+        self._frame_count = 0
 
     async def start(self):
         self._task = asyncio.create_task(self._run())
@@ -31,6 +32,9 @@ class _TrackReceiver:
             try:
                 if self.callback:
                     self.callback(frame)
+                    self._frame_count += 1
+                    if self._frame_count % 60 == 0:
+                        logger.info("%s track received %s frames", self.track.kind, self._frame_count)
             except Exception as e:
                 logger.error("%s callback error: %s", self.track.kind, e)
 
@@ -76,12 +80,12 @@ class WebRTCPeer:
         @self.pc.on("icecandidate")
         async def on_icecandidate(candidate):
             if candidate and self.send_signaling:
-                await self.send_signaling({
+                asyncio.create_task(self.send_signaling({
                     "type": "ice",
                     "candidate": candidate.to_sdp(),
                     "sdpMid": candidate.sdpMid,
                     "sdpMLineIndex": candidate.sdpMLineIndex,
-                })
+                }))
 
         @self.pc.on("connectionstatechange")
         async def on_connectionstatechange():
@@ -104,10 +108,11 @@ class WebRTCPeer:
             )
             answer = await self.pc.createAnswer()
             await self.pc.setLocalDescription(answer)
-            await self.send_signaling({
-                "type": "answer",
-                "sdp": self.pc.localDescription.sdp,
-            })
+            if self.send_signaling:
+                await self.send_signaling({
+                    "type": "answer",
+                    "sdp": self.pc.localDescription.sdp,
+                })
             logger.info("Sent answer")
         elif msg_type == "answer":
             logger.info("Received answer")

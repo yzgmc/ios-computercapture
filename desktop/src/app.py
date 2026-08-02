@@ -54,6 +54,7 @@ class PhoneCamApp(QObject):
     def _on_video_frame(self, frame):
         self.video_frame_received.emit(frame)
         self.virtual_camera.send_frame(frame)
+        logger.debug("Video frame forwarded: %dx%d", frame.width, frame.height)
 
     def _on_audio_frame(self, frame):
         self.audio_frame_received.emit(frame)
