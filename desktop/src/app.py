@@ -90,11 +90,17 @@ class PhoneCamApp(QObject):
             import cv2
             import numpy as np
             if pixel_format != PixelFormat.BGRA:
-                logger.debug("Unsupported raw pixel format: %d", pixel_format)
+                logger.warning("Unsupported raw pixel format: %d", pixel_format)
                 return
             expected = bytes_per_row * height
             if len(raw) < expected:
+                logger.warning("Raw payload truncated: got %d, expected %d (w=%d h=%d bpr=%d)",
+                               len(raw), expected, width, height, bytes_per_row)
                 return
+            if not getattr(self, "_raw_first_frame_logged", False):
+                logger.info("Raw stream first frame: %dx%d bpr=%d payload=%d",
+                            width, height, bytes_per_row, len(raw))
+                self._raw_first_frame_logged = True
             arr = np.frombuffer(raw[:expected], dtype=np.uint8)
             stride_bytes = max(bytes_per_row, width * 4)
             arr = arr.reshape(height, stride_bytes)[:, :width * 4].reshape(height, width, 4)

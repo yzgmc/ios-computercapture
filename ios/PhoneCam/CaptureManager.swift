@@ -130,34 +130,15 @@ class CaptureManager: NSObject, ObservableObject {
 
             try videoDevice.lockForConfiguration()
             let dimensions = selectedResolution.size
-            let matchingFormats = videoDevice.formats.compactMap { format -> (AVCaptureDevice.Format, CMVideoDimensions)? in
-                let size = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-                guard CGFloat(size.width) >= dimensions.width && CGFloat(size.height) >= dimensions.height else { return nil }
-                return (format, size)
-            }
-            var selectedFormat: AVCaptureDevice.Format?
-            if let bestFormat = matchingFormats.min(by: { $0.1.width * $0.1.height < $1.1.width * $1.1.height }) {
-                selectedFormat = bestFormat.0
-                print("Selected format: \(bestFormat.1.width)x\(bestFormat.1.height)")
-            } else {
-                // 没有完全匹配目标的分辨率，使用设备支持的最高格式
-                if let highestFormat = videoDevice.formats.max(by: {
-                    let s1 = CMVideoFormatDescriptionGetDimensions($0.formatDescription)
-                    let s2 = CMVideoFormatDescriptionGetDimensions($1.formatDescription)
-                    return s1.width * s1.height < s2.width * s2.height
-                }) {
-                    selectedFormat = highestFormat
-                    let size = CMVideoFormatDescriptionGetDimensions(highestFormat.formatDescription)
-                    print("Fallback to highest format: \(size.width)x\(size.height)")
-                }
-            }
-
-            if let format = selectedFormat {
+            if let format = Self.selectBestFormat(in: videoDevice.formats,
+                                                   targetSize: dimensions,
+                                                   targetFps: Double(fps)) {
                 videoDevice.activeFormat = format
                 captureSession.sessionPreset = .inputPriority
 
                 // 记录实际采集尺寸，供 UI 按真实比例显示预览
                 let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+                print("Selected format: \(dims.width)x\(dims.height)")
                 await MainActor.run {
                     self.actualCaptureSize = CGSize(width: CGFloat(dims.width), height: CGFloat(dims.height))
                 }
@@ -213,18 +194,15 @@ class CaptureManager: NSObject, ObservableObject {
         do {
             try device.lockForConfiguration()
             let dimensions = selectedResolution.size
-            let matchingFormats = device.formats.compactMap { format -> (AVCaptureDevice.Format, CMVideoDimensions)? in
-                let size = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-                guard CGFloat(size.width) >= dimensions.width && CGFloat(size.height) >= dimensions.height else { return nil }
-                return (format, size)
-            }
-            if let bestFormat = matchingFormats.min(by: { $0.1.width * $0.1.height < $1.1.width * $1.1.height }) {
-                device.activeFormat = bestFormat.0
-                let clampedFps = Self.clampFps(Double(fps), format: bestFormat.0)
+            if let format = Self.selectBestFormat(in: device.formats,
+                                                   targetSize: dimensions,
+                                                   targetFps: Double(fps)) {
+                device.activeFormat = format
+                let clampedFps = Self.clampFps(Double(fps), format: format)
                 let frameDuration = CMTime(value: 1, timescale: CMTimeScale(clampedFps))
                 device.activeVideoMinFrameDuration = frameDuration
                 device.activeVideoMaxFrameDuration = frameDuration
-                let dims = CMVideoFormatDescriptionGetDimensions(bestFormat.0.formatDescription)
+                let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
                 await MainActor.run {
                     self.actualCaptureSize = CGSize(width: CGFloat(dims.width), height: CGFloat(dims.height))
                 }
@@ -236,12 +214,30 @@ class CaptureManager: NSObject, ObservableObject {
         }
     }
 
-    /// 帧率变更时仅更新 activeVideoMinFrameDuration/MaxFrameDuration。
+    /// 帧率变更时更新帧率；若当前 format 不支持目标帧率则切换 format（如 4K@30 → 4K@60）。
     private func applyFps() async {
         guard let input = videoDeviceInput, captureSession.isRunning else { return }
         let device = input.device
         do {
             try device.lockForConfiguration()
+            // 若当前 format 不支持目标帧率，重新选择同分辨率下支持该帧率的 format
+            let currentFormat = device.activeFormat
+            let supportsFps = currentFormat.videoSupportedFrameRateRanges.contains { range in
+                Double(fps) >= range.minFrameRate && Double(fps) <= range.maxFrameRate
+            }
+            if !supportsFps {
+                let dimensions = selectedResolution.size
+                if let format = Self.selectBestFormat(in: device.formats,
+                                                       targetSize: dimensions,
+                                                       targetFps: Double(fps)) {
+                    device.activeFormat = format
+                    let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+                    await MainActor.run {
+                        self.actualCaptureSize = CGSize(width: CGFloat(dims.width), height: CGFloat(dims.height))
+                    }
+                    print("Switched format for fps: \(dims.width)x\(dims.height)")
+                }
+            }
             let clampedFps = Self.clampFps(Double(fps), format: device.activeFormat)
             let frameDuration = CMTime(value: 1, timescale: CMTimeScale(clampedFps))
             device.activeVideoMinFrameDuration = frameDuration
@@ -271,24 +267,47 @@ class CaptureManager: NSObject, ObservableObject {
     /// 高分辨率（4K/2K）通常不支持 60fps，强行设置会导致采集崩溃。
     static func clampFps(_ requestedFps: Double, format: AVCaptureDevice.Format) -> Double {
         let ranges = format.videoSupportedFrameRateRanges
-        // 取所有范围并集内最接近期望值的可用帧率
-        var supported = requestedFps
-        var found = false
+        // 在某个范围内直接返回
         for range in ranges {
-            let minFps = range.minFrameRate
-            let maxFps = range.maxFrameRate
-            if requestedFps >= minFps && requestedFps <= maxFps {
+            if requestedFps >= range.minFrameRate && requestedFps <= range.maxFrameRate {
                 return requestedFps
             }
-            // 记录该范围的最大可用值作为候选
-            if !found || maxFps < supported {
-                supported = maxFps
-                found = true
-            }
         }
-        // 若期望帧率高于所有范围上限，返回最大支持值；否则兜底 30
-        if !found { return 30.0 }
-        return min(supported, max(requestedFps, 15.0))
+        // 降级：取所有范围中最大的 maxFrameRate（旧实现误取最小值，导致 4K 锁到 30）
+        let maxSupported = ranges.map { $0.maxFrameRate }.max() ?? 30.0
+        return min(maxSupported, max(requestedFps, 15.0))
+    }
+
+    /// 从设备 formats 中选择最匹配目标的 format。
+    /// 优先：分辨率 >= 目标 且 支持目标帧率 且 面积最小（最接近目标分辨率）
+    /// 降级 1：分辨率 >= 目标 且 面积最小（不支持目标帧率，由 clampFps 降级）
+    /// 降级 2：无分辨率达标，取设备支持的最高分辨率
+    static func selectBestFormat(in formats: [AVCaptureDevice.Format],
+                                 targetSize: CGSize,
+                                 targetFps: Double) -> AVCaptureDevice.Format? {
+        let candidates = formats.compactMap { format -> (format: AVCaptureDevice.Format, size: CMVideoDimensions, supportsFps: Bool)? in
+            let size = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            guard CGFloat(size.width) >= targetSize.width && CGFloat(size.height) >= targetSize.height else { return nil }
+            let supportsFps = format.videoSupportedFrameRateRanges.contains { range in
+                targetFps >= range.minFrameRate && targetFps <= range.maxFrameRate
+            }
+            return (format, size, supportsFps)
+        }
+        // 优先：支持目标帧率 且 面积最小
+        if let best = candidates.filter({ $0.supportsFps })
+                                .min(by: { $0.size.width * $0.size.height < $1.size.width * $1.size.height }) {
+            return best.format
+        }
+        // 降级 1：分辨率达标但不支持目标帧率，取面积最小
+        if let best = candidates.min(by: { $0.size.width * $0.size.height < $1.size.width * $1.size.height }) {
+            return best.format
+        }
+        // 降级 2：取设备支持的最高分辨率
+        return formats.max(by: {
+            let s1 = CMVideoFormatDescriptionGetDimensions($0.formatDescription)
+            let s2 = CMVideoFormatDescriptionGetDimensions($1.formatDescription)
+            return s1.width * s1.height < s2.width * s2.height
+        })
     }
 }
 

@@ -82,6 +82,10 @@ class RawStreamReceiver:
                     break
 
                 self._frame_count += 1
+                if self._frame_count == 1:
+                    logger.info("RawStream first frame: %dx%d bpr=%d payload=%d",
+                                fields["width"], fields["height"],
+                                fields["bytes_per_row"], payload_length)
                 if self.on_frame:
                     try:
                         self.on_frame(
