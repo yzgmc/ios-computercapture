@@ -13,6 +13,7 @@ targets:
       base:
         INFOPLIST_FILE: PhoneCam/Info.plist
         PRODUCT_BUNDLE_IDENTIFIER: com.yzg.phonecam
+        DEVELOPMENT_TEAM: "7KQ4Z998AK"
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: "iPhone Developer"
         PROVISIONING_PROFILE_SPECIFIER: phonecam
