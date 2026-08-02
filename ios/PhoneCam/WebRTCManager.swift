@@ -8,6 +8,7 @@ class WebRTCManager: NSObject, ObservableObject {
     private var peerConnection: RTCPeerConnection?
     private let factory: RTCPeerConnectionFactory
     private var signalingClient: SignalingClient?
+    private var targetResolution: CaptureResolution?
 
     private let iceServers = [
         RTCIceServer(urlStrings: ["stun:stun.l.google.com:19302"])
@@ -28,12 +29,17 @@ class WebRTCManager: NSObject, ObservableObject {
                 await self?.handleSignalingMessage(message)
             }
         }
-        client.connect()
-        self.signalingClient = client
-        statusMessage = "已连接信令服务器"
+        do {
+            try await client.connect()
+            self.signalingClient = client
+            statusMessage = "已连接信令服务器"
+        } catch {
+            statusMessage = "信令服务器连接失败"
+        }
     }
 
-    func publish(videoTrack: RTCVideoTrack?, audioTrack: RTCAudioTrack?) async {
+    func publish(videoTrack: RTCVideoTrack?, audioTrack: RTCAudioTrack?, targetResolution: CaptureResolution? = nil) async {
+        self.targetResolution = targetResolution
         let config = RTCConfiguration()
         config.iceServers = iceServers
         config.sdpSemantics = .unifiedPlan
@@ -89,6 +95,28 @@ class WebRTCManager: NSObject, ObservableObject {
                 peerConnection?.setRemoteDescription(remoteDesc) { error in
                     continuation.resume()
                 }
+            }
+            // 配置视频编码参数：优先保持分辨率，并按目标分辨率设置较高码率
+            if let sender = peerConnection?.senders.first(where: { $0.track?.kind == "video" }) {
+                let params = sender.parameters
+                params.degradationPreference = .maintainResolution
+                let targetBitrate: Int
+                switch targetResolution {
+                case .p4K:
+                    targetBitrate = 25_000_000
+                case .p2K:
+                    targetBitrate = 15_000_000
+                case .p1080:
+                    targetBitrate = 8_000_000
+                case .p720, .p480, .p240:
+                    targetBitrate = 5_000_000
+                case .none:
+                    targetBitrate = 8_000_000
+                }
+                for encoding in params.encodings {
+                    encoding.maxBitrateBps = NSNumber(value: targetBitrate)
+                }
+                sender.parameters = params
             }
             statusMessage = "WebRTC 连接已建立"
         } else if type == "ice",
@@ -152,10 +180,11 @@ extension WebRTCManager: RTCPeerConnectionDelegate {
                                     didOpen dataChannel: RTCDataChannel) {}
 }
 
-class SignalingClient: NSObject {
+class SignalingClient: NSObject, URLSessionWebSocketDelegate {
     private let url: String
     private let roomID: String
     private var webSocketTask: URLSessionWebSocketTask?
+    private var connectContinuation: CheckedContinuation<Void, Error>?
     var onMessage: (([String: Any]) -> Void)?
 
     init(url: String, roomID: String) {
@@ -164,12 +193,33 @@ class SignalingClient: NSObject {
         super.init()
     }
 
-    func connect() {
-        guard let wsURL = URL(string: "\(url)/ws/\(roomID)") else { return }
-        let session = URLSession(configuration: .default)
+    func connect() async throws {
+        guard let wsURL = URL(string: "\(url)/ws/\(roomID)") else {
+            throw SignalingError.invalidURL
+        }
+        let session = URLSession(configuration: .default, delegate: self, delegateQueue: OperationQueue())
         webSocketTask = session.webSocketTask(with: wsURL)
         webSocketTask?.resume()
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            self.connectContinuation = continuation
+        }
         receiveMessage()
+    }
+
+    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
+        DispatchQueue.main.async {
+            self.connectContinuation?.resume()
+            self.connectContinuation = nil
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error = error {
+            DispatchQueue.main.async {
+                self.connectContinuation?.resume(throwing: error)
+                self.connectContinuation = nil
+            }
+        }
     }
 
     private func receiveMessage() {
@@ -198,6 +248,13 @@ class SignalingClient: NSObject {
     }
 
     func disconnect() {
+        connectContinuation?.resume(throwing: SignalingError.disconnected)
+        connectContinuation = nil
         webSocketTask?.cancel(with: .goingAway, reason: nil)
     }
+}
+
+enum SignalingError: Error {
+    case invalidURL
+    case disconnected
 }

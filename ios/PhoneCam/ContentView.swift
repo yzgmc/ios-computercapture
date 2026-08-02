@@ -293,7 +293,8 @@ struct ContentView: View {
             await webRTCManager.connect(signalingURL: serverURL, roomID: roomID)
             await captureManager.startCapture()
             await webRTCManager.publish(videoTrack: captureManager.videoTrack,
-                                         audioTrack: captureManager.audioTrack)
+                                     audioTrack: captureManager.audioTrack,
+                                     targetResolution: captureManager.selectedResolution)
             await MainActor.run {
                 isConnected = true
             }

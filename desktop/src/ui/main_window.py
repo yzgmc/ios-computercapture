@@ -6,7 +6,7 @@ from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QComboBox,
-    QSlider, QGroupBox, QStatusBar
+    QSlider, QGroupBox, QStatusBar, QCheckBox
 )
 
 logger = logging.getLogger(__name__)
@@ -69,7 +69,7 @@ class MainWindow(QMainWindow):
 
         video_layout.addWidget(QLabel("分辨率"))
         self.resolution_combo = QComboBox()
-        self.resolution_combo.addItems(["1920x1080", "1280x720", "640x480", "320x240"])
+        self.resolution_combo.addItems(["3840x2160", "2560x1440", "1920x1080", "1280x720", "640x480", "320x240"])
         video_layout.addWidget(self.resolution_combo)
 
         video_layout.addWidget(QLabel("帧率"))
@@ -79,6 +79,11 @@ class MainWindow(QMainWindow):
         self.fps_label = QLabel("30 fps")
         video_layout.addWidget(self.fps_slider)
         video_layout.addWidget(self.fps_label)
+
+        self.flip_horizontal_checkbox = QCheckBox("水平翻转")
+        self.flip_vertical_checkbox = QCheckBox("垂直翻转")
+        video_layout.addWidget(self.flip_horizontal_checkbox)
+        video_layout.addWidget(self.flip_vertical_checkbox)
 
         control_layout.addWidget(video_group)
 
@@ -125,6 +130,8 @@ class MainWindow(QMainWindow):
         self.resolution_combo.currentTextChanged.connect(self._on_settings_changed)
         self.fps_slider.valueChanged.connect(self._on_fps_changed)
         self.volume_slider.valueChanged.connect(self._on_volume_changed)
+        self.flip_horizontal_checkbox.stateChanged.connect(self._on_settings_changed)
+        self.flip_vertical_checkbox.stateChanged.connect(self._on_settings_changed)
 
         self.virtual_camera_button.toggled.connect(self.virtual_camera_toggled.emit)
         self.virtual_audio_button.toggled.connect(self.virtual_audio_toggled.emit)
@@ -157,13 +164,27 @@ class MainWindow(QMainWindow):
             "height": height,
             "fps": self.fps_slider.value(),
             "volume": self.volume_slider.value() / 100.0,
+            "flip_horizontal": self.flip_horizontal_checkbox.isChecked(),
+            "flip_vertical": self.flip_vertical_checkbox.isChecked(),
         }
         self.settings_changed.emit(settings)
 
     def update_video_frame(self, frame):
         """frame 为 aiortc 的 VideoFrame"""
         try:
+            import cv2
             img = frame.to_ndarray(format="rgb24")
+            flip_code = -1
+            if self.flip_horizontal_checkbox.isChecked() and not self.flip_vertical_checkbox.isChecked():
+                flip_code = 1
+            elif self.flip_vertical_checkbox.isChecked() and not self.flip_horizontal_checkbox.isChecked():
+                flip_code = 0
+            elif self.flip_horizontal_checkbox.isChecked() and self.flip_vertical_checkbox.isChecked():
+                flip_code = -1
+            else:
+                flip_code = None
+            if flip_code is not None:
+                img = cv2.flip(img, flip_code)
             h, w, ch = img.shape
             bytes_per_line = ch * w
             qt_image = QImage(img.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)

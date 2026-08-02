@@ -19,6 +19,8 @@ class VirtualCameraOutput:
         self.width = width
         self.height = height
         self.fps = fps
+        self.flip_horizontal = False
+        self.flip_vertical = False
         self.enabled = False
         self._cam = None
 
@@ -45,13 +47,19 @@ class VirtualCameraOutput:
         if not self.enabled or self._cam is None:
             return
         try:
+            import cv2
             # aiortc VideoFrame 转换为 RGB numpy 数组
             img = frame.to_ndarray(format="rgb24")
-            # 缩放到虚拟摄像头目标尺寸
+            # 翻转
+            if self.flip_horizontal and self.flip_vertical:
+                img = cv2.flip(img, -1)
+            elif self.flip_horizontal:
+                img = cv2.flip(img, 1)
+            elif self.flip_vertical:
+                img = cv2.flip(img, 0)
+            # 缩放到虚拟摄像头目标尺寸（保持 RGB）
             if img.shape[0] != self.height or img.shape[1] != self.width:
-                import cv2
                 img = cv2.resize(img, (self.width, self.height))
-                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             self._cam.send(img)
             self._cam.sleep_until_next_frame()
         except Exception as e:
@@ -65,6 +73,10 @@ class VirtualCameraOutput:
         if need_restart:
             self.disable()
             self.enable()
+
+    def update_flip(self, horizontal: bool, vertical: bool):
+        self.flip_horizontal = horizontal
+        self.flip_vertical = vertical
 
 
 class VirtualAudioOutput:

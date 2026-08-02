@@ -3,12 +3,14 @@ import UIKit
 import WebRTC
 
 enum CaptureResolution: CaseIterable, Identifiable {
-    case p1080, p720, p480, p240
+    case p4K, p2K, p1080, p720, p480, p240
 
     var id: Self { self }
 
     var label: String {
         switch self {
+        case .p4K: return "4K"
+        case .p2K: return "2K"
         case .p1080: return "1080p"
         case .p720: return "720p"
         case .p480: return "480p"
@@ -18,6 +20,8 @@ enum CaptureResolution: CaseIterable, Identifiable {
 
     var size: CGSize {
         switch self {
+        case .p4K: return CGSize(width: 3840, height: 2160)
+        case .p2K: return CGSize(width: 2560, height: 1440)
         case .p1080: return CGSize(width: 1920, height: 1080)
         case .p720: return CGSize(width: 1280, height: 720)
         case .p480: return CGSize(width: 640, height: 480)
@@ -118,12 +122,13 @@ class CaptureManager: NSObject, ObservableObject {
 
             try videoDevice.lockForConfiguration()
             let dimensions = selectedResolution.size
-            if let format = videoDevice.formats.first(where: {
-                let desc = $0.formatDescription
-                let size = CMVideoFormatDescriptionGetDimensions(desc)
-                return CGFloat(size.width) >= dimensions.width && CGFloat(size.height) >= dimensions.height
-            }) {
-                videoDevice.activeFormat = format
+            let matchingFormats = videoDevice.formats.compactMap { format -> (AVCaptureDevice.Format, CMVideoDimensions)? in
+                let size = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+                guard CGFloat(size.width) >= dimensions.width && CGFloat(size.height) >= dimensions.height else { return nil }
+                return (format, size)
+            }
+            if let bestFormat = matchingFormats.min(by: { $0.1.width * $0.1.height < $1.1.width * $1.1.height }) {
+                videoDevice.activeFormat = bestFormat.0
             }
             videoDevice.activeVideoMinFrameDuration = CMTime(value: 1, timescale: CMTimeScale(fps))
             videoDevice.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: CMTimeScale(fps))

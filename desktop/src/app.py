@@ -41,6 +41,8 @@ class PhoneCamApp(QObject):
             device_index=find_default_virtual_audio_device()
         )
 
+        self._pending_messages: list[dict] = []
+
         self._setup_peer_signals()
         self._start_discovery()
 
@@ -71,14 +73,19 @@ class PhoneCamApp(QObject):
     async def _on_connect_requested(self, signaling_url: str, room_id: str):
         logger.info("Connecting to %s / room %s", signaling_url, room_id)
         self.status_changed.emit("正在连接信令服务器...")
+        self._pending_messages = []
         try:
-            await self.signaling.connect(signaling_url, room_id)
-            self.signaling.on_message = self._on_signaling_message
-            self.status_changed.emit("正在建立 WebRTC 连接...")
+            # 先创建 PeerConnection 并设置消息处理，避免 iOS offer 到达时尚未就绪
             await self.peer.start(self.signaling.send)
+            self.signaling.on_message = self._on_signaling_message
+            await self.signaling.connect(signaling_url, room_id)
+            self.status_changed.emit("正在建立 WebRTC 连接...")
+            await self._flush_pending_messages()
         except Exception as e:
             logger.error("Connection failed: %s", e)
             self.status_changed.emit(f"连接失败: {e}")
+            if self._pending_messages is not None:
+                self._pending_messages.clear()
 
     @asyncSlot()
     async def _on_disconnect_requested(self):
@@ -94,6 +101,10 @@ class PhoneCamApp(QObject):
         height = settings.get("height", 720)
         fps = settings.get("fps", 30)
         self.virtual_camera.update_format(width, height, fps)
+        self.virtual_camera.update_flip(
+            settings.get("flip_horizontal", False),
+            settings.get("flip_vertical", False),
+        )
         await self.peer.update_settings(settings)
 
     @asyncSlot(bool)
@@ -115,7 +126,16 @@ class PhoneCamApp(QObject):
             self.status_changed.emit("虚拟麦克风已停止")
 
     def _on_signaling_message(self, message: dict):
-        asyncio.create_task(self.peer.handle_signaling_message(message))
+        if self._pending_messages is not None:
+            self._pending_messages.append(message)
+        else:
+            asyncio.create_task(self.peer.handle_signaling_message(message))
+
+    async def _flush_pending_messages(self):
+        pending = self._pending_messages
+        self._pending_messages = None
+        for message in pending:
+            await self.peer.handle_signaling_message(message)
 
     def _on_connection_state_change(self, state: str):
         self.status_changed.emit(f"连接状态: {state}")
