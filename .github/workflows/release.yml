@@ -76,9 +76,7 @@ jobs:
         working-directory: ios
         run: |
           xcodebuild -showBuildSettings \
-            -workspace PhoneCam.xcworkspace \
-            -scheme PhoneCam \
-            -sdk iphoneos \
+            -project Pods/Pods.xcodeproj \
             -target Pods-PhoneCam \
             | grep -E 'CODE_SIGN|PROVISIONING_PROFILE|DEVELOPMENT_TEAM' || true
 
