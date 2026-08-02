@@ -55,12 +55,47 @@ class CaptureManager: NSObject, ObservableObject {
         super.init()
     }
 
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+        UIDevice.current.endGeneratingDeviceOrientationNotifications()
+    }
+
     func setupPreview(in view: UIView) {
         let previewLayer = AVCaptureVideoPreviewLayer(session: captureSession)
         previewLayer.videoGravity = .resizeAspectFill
         previewLayer.frame = view.bounds
+        previewLayer.connection?.videoOrientation = currentVideoOrientation()
         view.layer.addSublayer(previewLayer)
         self.previewLayer = previewLayer
+
+        UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(orientationDidChange),
+            name: UIDevice.orientationDidChangeNotification,
+            object: nil
+        )
+    }
+
+    @objc private func orientationDidChange() {
+        guard let previewLayer = previewLayer else { return }
+        previewLayer.connection?.videoOrientation = currentVideoOrientation()
+    }
+
+    private func currentVideoOrientation() -> AVCaptureVideoOrientation {
+        let orientation = UIDevice.current.orientation
+        switch orientation {
+        case .portrait: return .portrait
+        case .portraitUpsideDown: return .portraitUpsideDown
+        case .landscapeLeft: return .landscapeRight
+        case .landscapeRight: return .landscapeLeft
+        default: return .portrait
+        }
+    }
+
+    func updatePreviewFrame(to bounds: CGRect) {
+        guard let previewLayer = previewLayer else { return }
+        previewLayer.frame = bounds
     }
 
     func startCapture() async {
