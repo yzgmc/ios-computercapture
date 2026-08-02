@@ -1,7 +1,6 @@
 import Foundation
 import Network
 import CoreMedia
-import Accelerate
 import CoreVideo
 
 /// 原画质无压缩视频传输：将采集到的 CVPixelBuffer 以 BGRA 像素通过 UDP 分片发送到桌面端。
@@ -117,60 +116,18 @@ final class RawStreamServer {
     }
 
     /// 将任意格式的 CVPixelBuffer 转换为 BGRA。仅在采集格式非 BGRA 时使用。
+    ///
+    /// 注意：当前采集管道已配置 BGRA 输出（见 CaptureManager videoSettings），
+    /// `processSampleBuffer` 默认以 `requiresBGRAConversion: false` 调用，
+    /// 此方法仅为兜底。非 BGRA 输入将返回 nil 并丢弃该帧，避免引入易错的
+    /// vImage Swift 桥接调用；如未来确需支持非 BGRA 采集，应在此处实现并
+    /// 在真机验证后再合入。
     private func convertToBGRA(_ source: CVPixelBuffer) -> CVPixelBuffer? {
-        let width = CVPixelBufferGetWidth(source)
-        let height = CVPixelBufferGetHeight(source)
-        var output: CVPixelBuffer?
-        let attrs: [String: Any] = [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-            kCVPixelBufferWidthKey as String: width,
-            kCVPixelBufferHeightKey as String: height,
-        ]
-        CVPixelBufferCreate(kCFAllocatorDefault, width, height,
-                            kCVPixelFormatType_32BGRA, attrs as CFDictionary, &output)
-        guard let bgra = output else { return nil }
-        CVPixelBufferLockBaseAddress(source, .readOnly)
-        CVPixelBufferLockBaseAddress(bgra, [])
-        // 使用 vImage 进行格式转换（通用回退）
-        var srcBuffer = vImage_Buffer(data: CVPixelBufferGetBaseAddress(source),
-                                      height: vImagePixelCount(height),
-                                      width: vImagePixelCount(width),
-                                      rowBytes: CVPixelBufferGetBytesPerRow(source))
-        var dstBuffer = vImage_Buffer(data: CVPixelBufferGetBaseAddress(bgra),
-                                      height: vImagePixelCount(height),
-                                      width: vImagePixelCount(width),
-                                      rowBytes: CVPixelBufferGetBytesPerRow(bgra))
         let srcFormat = CVPixelBufferGetPixelFormatType(source)
-        switch srcFormat {
-        case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange:
-            // 420 双平面 -> BGRA，使用 vImage 转换链
-            var yBuffer = vImage_Buffer(data: CVPixelBufferGetBaseAddressOfPlane(source, 0),
-                                        height: vImagePixelCount(height),
-                                        width: vImagePixelCount(width),
-                                        rowBytes: CVPixelBufferGetBytesPerRowOfPlane(source, 0))
-            var cbCrBuffer = vImage_Buffer(data: CVPixelBufferGetBaseAddressOfPlane(source, 1),
-                                           height: vImagePixelCount(CVPixelBufferGetHeightOfPlane(source, 1)),
-                                           width: vImagePixelCount(CVPixelBufferGetWidthOfPlane(source, 1)),
-                                           rowBytes: CVPixelBufferGetBytesPerRowOfPlane(source, 1))
-            var info = vImage_YpCbCrToARGB()
-            vImageConvert_YpCbCrToARGB_GenerateConversion(
-                kvImage_YpCbCrToARGBMatrix_ITU_R_601_4,
-                kvImage_YpCbCrToARGB_NoAlpha,
-                &info,
-                kvImage420Yp8_CbCr8,
-                kvImageARGB8888,
-                kvImageNoFlags
-            )
-            let alpha: [UInt8] = [0, 0, 0, 255]
-            vImageConvert_420Yp8_CbCr8ToARGB8888(&yBuffer, &cbCrBuffer, &dstBuffer,
-                                                  &info, alpha, 0, kvImageNoFlags)
-        default:
-            // 兜底：直接拷贝（假设已为 BGRA/RGBA）
-            memcpy(dstBuffer.data, srcBuffer.data, min(srcBuffer.rowBytes * Int(srcBuffer.height),
-                                                       dstBuffer.rowBytes * Int(dstBuffer.height)))
+        if srcFormat == kCVPixelFormatType_32BGRA {
+            return source
         }
-        CVPixelBufferUnlockBaseAddress(bgra, [])
-        CVPixelBufferUnlockBaseAddress(source, .readOnly)
-        return bgra
+        print("RawStreamServer: non-BGRA pixel format \(srcFormat) not supported, dropping frame")
+        return nil
     }
 }
