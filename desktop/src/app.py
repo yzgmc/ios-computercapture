@@ -51,7 +51,7 @@ class PhoneCamApp(QObject):
             device_index=find_default_virtual_audio_device()
         )
 
-        # 原画质 UDP 接收器（随桌面端启动，监听 5000 端口等待 iOS 推流）
+        # 原画质 TCP 接收器（随桌面端启动，监听 5000 端口等待 iOS 推流）
         self.raw_receiver = RawStreamReceiver(
             host="0.0.0.0", port=RAW_STREAM_PORT, on_frame=self._on_raw_frame
         )
@@ -158,7 +158,7 @@ class PhoneCamApp(QObject):
         except Exception as e:
             logger.warning("Failed to start discovery service: %s", e)
 
-        # 3. 启动原画质 UDP 接收器（等待 iOS 端推流）
+        # 3. 启动原画质 TCP 接收器（等待 iOS 端推流）
         try:
             await self.raw_receiver.start()
             self.status_changed.emit(f"原画质接收器已监听 :{RAW_STREAM_PORT}")

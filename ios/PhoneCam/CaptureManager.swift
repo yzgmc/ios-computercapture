@@ -50,7 +50,7 @@ class CaptureManager: NSObject, ObservableObject {
 
     var videoTrack: RTCVideoTrack?
     var audioTrack: RTCAudioTrack?
-    /// 原画质传输模块，启用后每帧采样都会转发（BGRA 无压缩 UDP）
+    /// 原画质传输模块，启用后每帧采样都会转发（BGRA 无压缩 TCP）
     var rawStreamServer: RawStreamServer?
 
     private let videoSource: RTCVideoSource
@@ -183,7 +183,7 @@ class CaptureManager: NSObject, ObservableObject {
             }
 
             let videoOutput = AVCaptureVideoDataOutput()
-            // 统一输出 BGRA：WebRTC RTCCVPixelBuffer 支持，同时供原画质 UDP 模块直接发送
+            // 统一输出 BGRA：WebRTC RTCCVPixelBuffer 支持，同时供原画质 TCP 模块直接发送
             videoOutput.videoSettings = [
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
             ]

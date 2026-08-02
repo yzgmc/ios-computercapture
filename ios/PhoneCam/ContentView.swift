@@ -17,7 +17,7 @@ struct ContentView: View {
     @State private var serverURL = "ws://192.168.1.100:8080"
     @State private var roomID = "room1"
     @State private var isConnected = false
-    // 原画质传输（无压缩 UDP，局域网适用）
+    // 原画质传输（无压缩 TCP，局域网适用）
     @State private var rawStreamEnabled = false
     @State private var rawStreamHost = "192.168.1.100"
     @State private var rawStreamPort = "5000"
@@ -271,7 +271,7 @@ struct ContentView: View {
     }
 
     // MARK: - 原画质传输卡片
-    // 启用后通过 UDP 发送无压缩 BGRA 像素帧到桌面端，适用于局域网无损场景。
+    // 启用后通过 TCP 发送无压缩 BGRA 像素帧到桌面端，适用于局域网无损场景。
     @ViewBuilder
     private func rawStreamCard() -> some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -279,7 +279,7 @@ struct ContentView: View {
                 Image(systemName: "bolt.horizontal.fill")
                     .foregroundStyle(Color.accentColor)
                     .frame(width: 22)
-                Text("原画质传输（无压缩 UDP）")
+                Text("原画质传输（无压缩 TCP）")
                     .font(.headline)
                     .foregroundStyle(Color.primaryText)
                 Spacer()
@@ -309,7 +309,7 @@ struct ContentView: View {
                     Image(systemName: "dot.radiowaves.left.and.right")
                         .foregroundStyle(Color.secondaryText)
                         .frame(width: 24)
-                    TextField("UDP 端口", text: $rawStreamPort)
+                    TextField("TCP 端口", text: $rawStreamPort)
                         .textFieldStyle(.roundedBorder)
                         .keyboardType(.numberPad)
                         .disableAutocorrection(true)
@@ -413,7 +413,7 @@ struct ContentView: View {
     // MARK: - 业务逻辑
     private func connect() {
         Task {
-            // 启用原画质传输：连接桌面端 UDP 端口并挂载到采集管线
+            // 启用原画质传输：连接桌面端 TCP 端口并挂载到采集管线
             if rawStreamEnabled, let port = UInt16(rawStreamPort) {
                 captureManager.rawStreamServer = rawStreamServer
                 rawStreamServer.start(host: rawStreamHost, port: port)
