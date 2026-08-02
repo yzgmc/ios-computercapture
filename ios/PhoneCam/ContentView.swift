@@ -17,6 +17,11 @@ struct ContentView: View {
     @State private var serverURL = "ws://192.168.1.100:8080"
     @State private var roomID = "room1"
     @State private var isConnected = false
+    // 原画质传输（无压缩 UDP，局域网适用）
+    @State private var rawStreamEnabled = false
+    @State private var rawStreamHost = "192.168.1.100"
+    @State private var rawStreamPort = "5000"
+    private let rawStreamServer = RawStreamServer()
 
     var body: some View {
         NavigationView {
@@ -29,12 +34,14 @@ struct ContentView: View {
                         VStack(spacing: 16) {
                             previewCard(in: geometry)
                             connectionCard()
-                            remoteSettingsCard()
+                            captureSettingsCard()
+                            rawStreamCard()
                             statusBar()
                         }
                         .padding(.horizontal)
                         .padding(.top, 8)
-                        .padding(.bottom, 92) // 为底部固定按钮留出空间
+                        // 底部为固定连接按钮预留空间（按钮高度+上下边距），按屏幕高度自适应
+                        .padding(.bottom, max(92, geometry.size.height * 0.12))
                     }
 
                     connectButton()
@@ -89,14 +96,14 @@ struct ContentView: View {
                     }
                 }
                 .frame(maxWidth: .infinity)
-                .frame(height: previewHeight(for: geometry.size.width - 32))
+                .frame(height: previewHeight(for: geometry.size.width - 32, in: geometry))
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 .shadow(color: .black.opacity(0.08), radius: 8, x: 0, y: 4)
             } else {
                 // 未连接时仍展示本地预览，方便用户确认摄像头工作正常
                 CameraPreviewView(captureManager: captureManager)
                     .frame(maxWidth: .infinity)
-                    .frame(height: previewHeight(for: geometry.size.width - 32))
+                    .frame(height: previewHeight(for: geometry.size.width - 32, in: geometry))
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                     .shadow(color: .black.opacity(0.08), radius: 8, x: 0, y: 4)
             }
@@ -148,16 +155,16 @@ struct ContentView: View {
         .shadow(color: .black.opacity(0.04), radius: 12, x: 0, y: 6)
     }
 
-    // MARK: - 远端配置卡片（只读）
-    // 所有音视频/翻转参数均由桌面端推送，iPhone 端只显示，不可编辑。
+    // MARK: - 采集参数卡片（可编辑）
+    // 控制方向：iPhone 端可编辑分辨率/帧率/音量/翻转，实时推送到桌面端。
     @ViewBuilder
-    private func remoteSettingsCard() -> some View {
+    private func captureSettingsCard() -> some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 8) {
-                Image(systemName: "lock.fill")
-                    .foregroundStyle(Color.secondaryText)
+                Image(systemName: "slider.horizontal.3")
+                    .foregroundStyle(Color.accentColor)
                     .frame(width: 22)
-                Text("采集参数（由桌面端控制 · 只读）")
+                Text("采集参数（本机控制）")
                     .font(.headline)
                     .foregroundStyle(Color.primaryText)
                 Spacer()
@@ -165,15 +172,84 @@ struct ContentView: View {
 
             Divider()
 
-            readOnlyRow(label: "分辨率", value: resolutionDisplayText)
+            // 分辨率
+            HStack {
+                Text("分辨率")
+                    .font(.subheadline)
+                    .foregroundStyle(Color.secondaryText)
+                Spacer()
+                Picker("分辨率", selection: $captureManager.selectedResolution) {
+                    ForEach(CaptureResolution.allCases) { res in
+                        Text(res.label).tag(res)
+                    }
+                }
+                .pickerStyle(.menu)
+                .onChange(of: captureManager.selectedResolution) { _ in pushSettings() }
+            }
+
             Divider()
-            readOnlyRow(label: "帧率", value: fpsDisplayText)
+
+            // 帧率
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("帧率")
+                        .font(.subheadline)
+                        .foregroundStyle(Color.secondaryText)
+                    Spacer()
+                    Text("\(captureManager.fps) FPS")
+                        .font(.subheadline.bold())
+                        .monospacedDigit()
+                        .foregroundStyle(Color.primaryText)
+                }
+                Slider(value: Binding(
+                    get: { Double(captureManager.fps) },
+                    set: { captureManager.fps = Int($0) }
+                ), in: 15...60, step: 1)
+                .tint(Color.accentBlue)
+                .onChange(of: captureManager.fps) { _ in pushSettings() }
+            }
+
             Divider()
-            readOnlyRow(label: "音量", value: volumeDisplayText)
+
+            // 音量
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("音量")
+                        .font(.subheadline)
+                        .foregroundStyle(Color.secondaryText)
+                    Spacer()
+                    Text("\(Int(captureManager.volume * 100))%")
+                        .font(.subheadline.bold())
+                        .monospacedDigit()
+                        .foregroundStyle(Color.primaryText)
+                }
+                Slider(value: $captureManager.volume, in: 0...1, step: 0.05)
+                    .tint(Color.accentBlue)
+                    .onChange(of: captureManager.volume) { _ in pushSettings() }
+            }
+
             Divider()
-            readOnlyRow(label: "水平翻转", value: flipDisplayText(key: "flip_horizontal"))
-            Divider()
-            readOnlyRow(label: "垂直翻转", value: flipDisplayText(key: "flip_vertical"))
+
+            // 翻转
+            HStack {
+                Toggle("水平翻转", isOn: $captureManager.flipHorizontal)
+                    .toggleStyle(.switch)
+                    .tint(Color.accentBlue)
+                    .labelsHidden()
+                Text("水平翻转")
+                    .font(.subheadline)
+                    .foregroundStyle(Color.primaryText)
+                Spacer()
+                Toggle("垂直翻转", isOn: $captureManager.flipVertical)
+                    .toggleStyle(.switch)
+                    .tint(Color.accentBlue)
+                    .labelsHidden()
+                Text("垂直翻转")
+                    .font(.subheadline)
+                    .foregroundStyle(Color.primaryText)
+            }
+            .onChange(of: captureManager.flipHorizontal) { _ in pushSettings() }
+            .onChange(of: captureManager.flipVertical) { _ in pushSettings() }
         }
         .padding()
         .background(Color.cardBackground)
@@ -181,46 +257,73 @@ struct ContentView: View {
         .shadow(color: .black.opacity(0.04), radius: 12, x: 0, y: 6)
     }
 
-    private func readOnlyRow(label: String, value: String) -> some View {
-        HStack {
-            Text(label)
-                .font(.subheadline)
-                .foregroundStyle(Color.secondaryText)
-            Spacer()
-            Text(value)
-                .font(.subheadline.bold())
-                .monospacedDigit()
-                .foregroundStyle(Color.primaryText)
-        }
+    /// 收集当前采集参数并推送到桌面端。
+    private func pushSettings() {
+        let settings: [String: Any] = [
+            "width": Int(captureManager.selectedResolution.size.width),
+            "height": Int(captureManager.selectedResolution.size.height),
+            "fps": captureManager.fps,
+            "volume": captureManager.volume,
+            "flip_horizontal": captureManager.flipHorizontal,
+            "flip_vertical": captureManager.flipVertical,
+        ]
+        webRTCManager.sendSettings(settings)
     }
 
-    private var resolutionDisplayText: String {
-        if let w = webRTCManager.remoteSettings["width"] as? Int,
-           let h = webRTCManager.remoteSettings["height"] as? Int {
-            return "\(w)x\(h)"
-        }
-        return "\(Int(captureManager.selectedResolution.size.width))x\(Int(captureManager.selectedResolution.size.height))"
-    }
+    // MARK: - 原画质传输卡片
+    // 启用后通过 UDP 发送无压缩 BGRA 像素帧到桌面端，适用于局域网无损场景。
+    @ViewBuilder
+    private func rawStreamCard() -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 8) {
+                Image(systemName: "bolt.horizontal.fill")
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 22)
+                Text("原画质传输（无压缩 UDP）")
+                    .font(.headline)
+                    .foregroundStyle(Color.primaryText)
+                Spacer()
+                Toggle("启用", isOn: $rawStreamEnabled)
+                    .toggleStyle(.switch)
+                    .tint(Color.accentBlue)
+                    .labelsHidden()
+                Text(rawStreamEnabled ? "已启用" : "关闭")
+                    .font(.caption)
+                    .foregroundStyle(Color.secondaryText)
+            }
 
-    private var fpsDisplayText: String {
-        if let fps = webRTCManager.remoteSettings["fps"] as? Int {
-            return "\(fps) FPS"
+            if rawStreamEnabled {
+                Divider()
+                HStack(spacing: 12) {
+                    Image(systemName: "desktopcomputer")
+                        .foregroundStyle(Color.secondaryText)
+                        .frame(width: 24)
+                    TextField("桌面 IP", text: $rawStreamHost)
+                        .textFieldStyle(.roundedBorder)
+                        .keyboardType(.decimalPad)
+                        .autocapitalization(.none)
+                        .disableAutocorrection(true)
+                        .disabled(isConnected)
+                }
+                HStack(spacing: 12) {
+                    Image(systemName: "dot.radiowaves.left.and.right")
+                        .foregroundStyle(Color.secondaryText)
+                        .frame(width: 24)
+                    TextField("UDP 端口", text: $rawStreamPort)
+                        .textFieldStyle(.roundedBorder)
+                        .keyboardType(.numberPad)
+                        .disableAutocorrection(true)
+                        .disabled(isConnected)
+                }
+                Text("提示：无压缩传输带宽需求高（720p≈265Mbps），仅建议千兆局域网使用。")
+                    .font(.caption)
+                    .foregroundStyle(Color.secondaryText)
+            }
         }
-        return "\(captureManager.fps) FPS"
-    }
-
-    private var volumeDisplayText: String {
-        if let volume = webRTCManager.remoteSettings["volume"] as? Double {
-            return "\(Int(volume * 100))%"
-        }
-        return "\(Int(captureManager.volume * 100))%"
-    }
-
-    private func flipDisplayText(key: String) -> String {
-        if let flag = webRTCManager.remoteSettings[key] as? Bool {
-            return flag ? "开启" : "关闭"
-        }
-        return "关闭"
+        .padding()
+        .background(Color.cardBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .shadow(color: .black.opacity(0.04), radius: 12, x: 0, y: 6)
     }
 
     // MARK: - 状态栏
@@ -289,9 +392,11 @@ struct ContentView: View {
         return size.width / size.height
     }
 
-    private func previewHeight(for cardWidth: CGFloat) -> CGFloat {
+    /// 预览高度按卡片宽度与真实宽高比计算，并限制不超过可用高度的一半，
+    /// 确保 iPhone 12/15 及不同尺寸设备上预览与下方控件均可见。
+    private func previewHeight(for cardWidth: CGFloat, in geometry: GeometryProxy) -> CGFloat {
         let naturalHeight = cardWidth / previewAspectRatio
-        return min(naturalHeight, UIScreen.main.bounds.height * 0.55)
+        return min(naturalHeight, geometry.size.height * 0.5)
     }
 
     private var statusColor: Color {
@@ -308,6 +413,11 @@ struct ContentView: View {
     // MARK: - 业务逻辑
     private func connect() {
         Task {
+            // 启用原画质传输：连接桌面端 UDP 端口并挂载到采集管线
+            if rawStreamEnabled, let port = UInt16(rawStreamPort) {
+                captureManager.rawStreamServer = rawStreamServer
+                rawStreamServer.start(host: rawStreamHost, port: port)
+            }
             await webRTCManager.connect(signalingURL: serverURL, roomID: roomID)
             await captureManager.startCapture()
             await webRTCManager.publish(videoTrack: captureManager.videoTrack,
@@ -315,12 +425,16 @@ struct ContentView: View {
                                      targetResolution: captureManager.selectedResolution)
             await MainActor.run {
                 isConnected = true
+                // 连接建立后立即推送一次当前采集参数，data channel 就绪后会再次推送
+                pushSettings()
             }
         }
     }
 
     private func disconnect() {
         Task {
+            rawStreamServer.stop()
+            captureManager.rawStreamServer = nil
             await captureManager.stopCapture()
             await webRTCManager.disconnect()
             await MainActor.run {

@@ -1,52 +1,116 @@
-# USB 连接支持（开发中）
+# USB 连接支持（基于 Tethering 网络）
 
-USB 连接可以提供比 Wi-Fi 更稳定的传输和更低的延迟，且不受局域网环境影响。
+## 背景与约束
 
-## 实现思路
+iOS 在未越狱状态下，**无法在 USB 上启动自定义服务**。第三方 App 没有权限直接
+通过 USB 通道与桌面端通信。因此本项目 USB 连接采用 **tethering 网络方案**：
+利用 iPhone 的「个人热点」USB 共享功能，让 iPhone 与电脑之间建立一条 172.20.10.x
+网段的点对点 IP 链路，所有信令与媒体流仍走标准 TCP/UDP 协议。
 
-### 方案一：usbmuxd / libimobiledevice
+> 实现位置：
+> - 桌面端检测：`desktop/src/usb/`（`device_detector.py`、`tethering_discovery.py`）
+> - 依赖：`pyusb>=1.2.1`（见 `desktop/requirements.txt`）
 
-`usbmuxd` 是苹果官方用于 USB 与 iOS 设备通信的守护进程。它可以将 iPhone 上的 TCP 连接通过 USB 线缆转发到电脑。
+## 工作原理
 
-实现步骤：
-1. 在电脑上安装 `libimobiledevice` 和 `usbmuxd`
-2. 将 iPhone 上的某个端口（如 8080）通过 USB 转发到电脑的本地端口（如 127.0.0.1:8080）
-3. 电脑端信令服务器监听 127.0.0.1:8080
-4. iPhone 应用连接 127.0.0.1:8080，实际通过 USB 与电脑通信
-
-命令示例：
-```bash
-# 列出连接的设备
-idevice_id -l
-
-# 将 iPhone 的 8080 端口转发到电脑的 8080 端口
-iproxy 8080 8080
+```
+[iPhone App]
+   │  监听 0.0.0.0:8080（信令）+ UDP :5000（原画质）
+   │
+   │  USB 线缆 + 个人热点 (USB 模式)
+   ▼
+[172.20.10.x 网段]
+   │  iPhone 通常为 172.20.10.1（热点网关）
+   │  电脑由 DHCP 获得 172.20.10.x
+   ▼
+[桌面端]
+   │  device_detector: 确认 Apple USB 设备已接入
+   │  tethering_discovery: 扫描 172.20.10.0/24 找到 iPhone:8080
+   │  信令/WebRTC/Raw Stream 走该 IP，与 Wi-Fi 模式同协议
 ```
 
-### 方案二：pymobiledevice3
+## 使用流程
 
-`pymobiledevice3` 是一个纯 Python 的 usbmuxd 客户端，可以方便地实现端口转发。
+### 1. iPhone 端开启个人热点
+
+设置 → 个人热点 → 打开「允许其他人加入」→「最大兼容性」（强制 USB 模式）。
+
+### 2. USB 连接电脑
+
+用数据线连接 iPhone 与电脑，首次连接时 iPhone 会弹出「信任此电脑」，选择信任。
+电脑会自动识别为网络适配器并获得 172.20.10.x 地址（macOS/Windows 自带驱动）。
+
+### 3. 桌面端启动
+
+桌面端启动后：
+
+- `UsbDeviceDetector` 枚举 VID=0x05AC 的 Apple USB 设备，确认物理连接
+- `TetheringDiscovery` 优先探测 172.20.10.1:8080，未命中则并发扫描整个网段
+- 找到信令端点后，`ws://172.20.10.1:8080` 即可作为信令地址使用
+
+### 4. iOS 端配置
+
+在 iOS App 的「原画质传输」卡片中，将桌面端 IP 填为电脑在 tethering 网段的地址
+（如 172.20.10.2），即可走 USB tethering 链路传输原画质帧。
+
+## 模块说明
+
+### `usb/device_detector.py`
 
 ```python
-from pymobiledevice3.tcp_forwarder import TcpForwarder
+from usb import UsbDeviceDetector
 
-forwarder = TcpForwarder(device_udid, src_port=8080, dst_port=8080)
-forwarder.start()
+detector = UsbDeviceDetector()
+if detector.available:
+    devices = detector.list_apple_devices()
+    # [AppleUsbDevice(vid=0x05AC pid=0x12A8 name='iPhone' serial='...')]
 ```
 
-### 方案三：iOS 网络扩展（Network Extension）
+- pyusb 未安装或后端缺失时 `available=False`，`list_apple_devices()` 返回空列表
+- 仅做存在性检测，无法直接取得 iOS UDID（需 libimobiledevice）
+- Windows 需安装 iTunes / Apple Mobile Device Support 以提供 USB 驱动
 
-通过 iOS 的 Network Extension 创建本地 TUN 接口，实现更底层的网络隧道。这个方案更复杂，需要申请苹果的特殊权限。
+### `usb/tethering_discovery.py`
 
-## 集成计划
+```python
+import asyncio
+from usb import TetheringDiscovery
 
-1. 在桌面端添加 USB 设备检测模块
-2. 自动启动端口转发服务
-3. iOS 应用优先尝试 USB 连接，失败时回退到 Wi-Fi
-4. UI 上显示当前连接方式（USB / Wi-Fi）
+async def find():
+    discovery = TetheringDiscovery()  # 默认 172.20.10.0/24:8080
+    endpoint = await discovery.discover_first()
+    if endpoint:
+        print(endpoint.ws_url())  # ws://172.20.10.1:8080
+```
+
+- `discover()`：全量并发扫描网段，返回按延迟排序的可达端点列表
+- `discover_first()`：优先探测网关 172.20.10.1，未命中再全量扫描
+- `is_tethering_active()`：本机是否已获得 tethering 网段地址
+- 并发数受 `MAX_CONCURRENT_PROBES`（32）限制，单次探测超时 0.5s
+
+## 与其他方案的对比
+
+| 方案 | 可行性 | 说明 |
+|------|--------|------|
+| **USB tethering（本项目）** | ✅ 无需越狱 | 走标准 IP 协议，复用现有信令/媒体栈 |
+| usbmuxd / libimobiledevice | ⚠️ 需配合 | 可做端口转发（iproxy），但 iOS App 仍需监听端口 |
+| pymobiledevice3 | ⚠️ 需配合 | 纯 Python usbmuxd 客户端，本质同上 |
+| Network Extension | ❌ 需特权 | 苹果特殊权限，普通开发者无法申请 |
+| 自定义 USB 服务 | ❌ 需越狱 | 未越狱 iOS 不允许 |
+
+> usbmuxd 端口转发（`iproxy 8080 8080`）可在未开启个人热点时使用，但需要额外
+> 安装 libimobiledevice 工具链。本项目优先采用零依赖的 tethering 方案。
 
 ## 依赖
 
-- Windows: 安装 iTunes 或 Apple Mobile Device Support 以提供 usbmuxd 驱动
-- macOS: 系统自带 usbmuxd
-- Linux: 安装 `usbmuxd` 和 `libimobiledevice`
+- 桌面端：`pyusb>=1.2.1`（仅用于检测，未安装时优雅降级）
+- Windows：安装 iTunes 或独立的 Apple Mobile Device Support（提供 USB 驱动）
+- macOS：系统自带 Apple USB 驱动
+- Linux：安装 `usbmuxd` 与 `libimobiledevice`
+
+## 限制
+
+- tethering 网段地址可能随热点重启变化，发现结果不应长期缓存
+- 部分运营商合约机可能禁用个人热点的 USB 共享
+- 原画质 UDP 传输码率高（720p≈265Mbps），USB tethering 链路带宽充足可承载
+- 控制信令仍走 WebRTC data channel / 信令服务器，不依赖 USB 物理连接

@@ -31,9 +31,15 @@ enum CaptureResolution: CaseIterable, Identifiable {
 }
 
 class CaptureManager: NSObject, ObservableObject {
-    @Published var selectedResolution: CaptureResolution = .p720
-    @Published var fps: Int = 30
+    @Published var selectedResolution: CaptureResolution = .p720 {
+        didSet { Task { await reconfigureCapture() } }
+    }
+    @Published var fps: Int = 30 {
+        didSet { Task { await applyFps() } }
+    }
     @Published var volume: Double = 0.8
+    @Published var flipHorizontal: Bool = false
+    @Published var flipVertical: Bool = false
     // 摄像头实际输出尺寸（由 activeFormat 决定），用于预览按真实比例渲染
     @Published var actualCaptureSize: CGSize = CGSize(width: 1280, height: 720)
 
@@ -44,6 +50,8 @@ class CaptureManager: NSObject, ObservableObject {
 
     var videoTrack: RTCVideoTrack?
     var audioTrack: RTCAudioTrack?
+    /// 原画质传输模块，启用后每帧采样都会转发（BGRA 无压缩 UDP）
+    var rawStreamServer: RawStreamServer?
 
     private let videoSource: RTCVideoSource
     private let videoCapturer: RTCVideoCapturer
@@ -175,6 +183,10 @@ class CaptureManager: NSObject, ObservableObject {
             }
 
             let videoOutput = AVCaptureVideoDataOutput()
+            // 统一输出 BGRA：WebRTC RTCCVPixelBuffer 支持，同时供原画质 UDP 模块直接发送
+            videoOutput.videoSettings = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+            ]
             videoOutput.setSampleBufferDelegate(self, queue: DispatchQueue(label: "videoQueue"))
             if captureSession.canAddOutput(videoOutput) {
                 captureSession.addOutput(videoOutput)
@@ -191,6 +203,55 @@ class CaptureManager: NSObject, ObservableObject {
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             self?.captureSession.startRunning()
+        }
+    }
+
+    /// 分辨率变更时重新配置采集格式。仅在采集已启动时生效。
+    private func reconfigureCapture() async {
+        guard let input = videoDeviceInput, captureSession.isRunning else { return }
+        let device = input.device
+        do {
+            try device.lockForConfiguration()
+            let dimensions = selectedResolution.size
+            let matchingFormats = device.formats.compactMap { format -> (AVCaptureDevice.Format, CMVideoDimensions)? in
+                let size = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+                guard CGFloat(size.width) >= dimensions.width && CGFloat(size.height) >= dimensions.height else { return nil }
+                return (format, size)
+            }
+            if let bestFormat = matchingFormats.min(by: { $0.1.width * $0.1.height < $1.1.width * $1.1.height }) {
+                device.activeFormat = bestFormat.0
+                let clampedFps = Self.clampFps(Double(fps), format: bestFormat.0)
+                let frameDuration = CMTime(value: 1, timescale: CMTimeScale(clampedFps))
+                device.activeVideoMinFrameDuration = frameDuration
+                device.activeVideoMaxFrameDuration = frameDuration
+                let dims = CMVideoFormatDescriptionGetDimensions(bestFormat.0.formatDescription)
+                await MainActor.run {
+                    self.actualCaptureSize = CGSize(width: CGFloat(dims.width), height: CGFloat(dims.height))
+                }
+                print("Reconfigured capture: \(dims.width)x\(dims.height) @ \(clampedFps)fps")
+            }
+            device.unlockForConfiguration()
+        } catch {
+            print("Reconfigure capture failed: \(error)")
+        }
+    }
+
+    /// 帧率变更时仅更新 activeVideoMinFrameDuration/MaxFrameDuration。
+    private func applyFps() async {
+        guard let input = videoDeviceInput, captureSession.isRunning else { return }
+        let device = input.device
+        do {
+            try device.lockForConfiguration()
+            let clampedFps = Self.clampFps(Double(fps), format: device.activeFormat)
+            let frameDuration = CMTime(value: 1, timescale: CMTimeScale(clampedFps))
+            device.activeVideoMinFrameDuration = frameDuration
+            device.activeVideoMaxFrameDuration = frameDuration
+            await MainActor.run {
+                if clampedFps != Double(self.fps) { self.fps = Int(clampedFps) }
+            }
+            device.unlockForConfiguration()
+        } catch {
+            print("Apply fps failed: \(error)")
         }
     }
 
@@ -241,5 +302,7 @@ extension CaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate {
                                      rotation: ._0,
                                      timeStampNs: Int64(CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer)) * 1_000_000_000))
         videoSource.capturer(videoCapturer, didCapture: rtcFrame)
+        // 转发到原画质传输模块（采集格式已为 BGRA，无需转换）
+        rawStreamServer?.processSampleBuffer(sampleBuffer, requiresBGRAConversion: false)
     }
 }

@@ -2,7 +2,8 @@ import asyncio
 import logging
 import socket
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import Qt, QObject, pyqtSignal
+from PyQt6.QtGui import QImage, QPixmap
 from qasync import asyncSlot
 
 from ui.main_window import MainWindow
@@ -12,24 +13,26 @@ from capture.virtual_device import (
     VirtualCameraOutput, VirtualAudioOutput, find_default_virtual_audio_device
 )
 from discovery.service import DiscoveryService
+from raw_stream import RawStreamReceiver, PixelFormat
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_PORT = 8080
 DEFAULT_ROOM = "room1"
+RAW_STREAM_PORT = 5000
 
 
 class PhoneCamApp(QObject):
     status_changed = pyqtSignal(str)
     video_frame_received = pyqtSignal(object)
     audio_frame_received = pyqtSignal(object)
+    raw_frame_received = pyqtSignal(bytes, int, int, int, int)
 
     def __init__(self):
         super().__init__()
         self.window = MainWindow()
         self.window.connect_requested.connect(self._on_connect_requested)
         self.window.disconnect_requested.connect(self._on_disconnect_requested)
-        self.window.settings_changed.connect(self._on_settings_changed)
         self.window.virtual_camera_toggled.connect(self._on_virtual_camera_toggled)
         self.window.virtual_audio_toggled.connect(self._on_virtual_audio_toggled)
 
@@ -48,15 +51,23 @@ class PhoneCamApp(QObject):
             device_index=find_default_virtual_audio_device()
         )
 
+        # 原画质 UDP 接收器（随桌面端启动，监听 5000 端口等待 iOS 推流）
+        self.raw_receiver = RawStreamReceiver(
+            host="0.0.0.0", port=RAW_STREAM_PORT, on_frame=self._on_raw_frame
+        )
+
         self._pending_messages: list[dict] | None = []
         self._auto_started = False
 
         self._setup_peer_signals()
+        self.raw_frame_received.connect(self._display_raw_frame)
 
     def _setup_peer_signals(self):
         self.peer.on_video_frame = self._on_video_frame
         self.peer.on_audio_frame = self._on_audio_frame
         self.peer.on_connection_state_change = self._on_connection_state_change
+        # 控制方向已反转：iOS 端推送采集参数，桌面端只读接收
+        self.peer.on_remote_settings = self._on_remote_settings
 
     def _on_video_frame(self, frame):
         self.video_frame_received.emit(frame)
@@ -66,6 +77,49 @@ class PhoneCamApp(QObject):
     def _on_audio_frame(self, frame):
         self.audio_frame_received.emit(frame)
         self.virtual_audio.send_frame(frame)
+
+    def _on_raw_frame(self, raw: bytes, width: int, height: int,
+                      pixel_format: int, bytes_per_row: int):
+        """原画质帧到达（asyncio 线程），通过信号转发到主线程显示。"""
+        self.raw_frame_received.emit(raw, width, height, pixel_format, bytes_per_row)
+
+    def _display_raw_frame(self, raw: bytes, width: int, height: int,
+                           pixel_format: int, bytes_per_row: int):
+        """在主线程将 BGRA 原始帧渲染到预览控件。"""
+        try:
+            import cv2
+            import numpy as np
+            if pixel_format != PixelFormat.BGRA:
+                logger.debug("Unsupported raw pixel format: %d", pixel_format)
+                return
+            expected = bytes_per_row * height
+            if len(raw) < expected:
+                return
+            arr = np.frombuffer(raw[:expected], dtype=np.uint8)
+            stride_bytes = max(bytes_per_row, width * 4)
+            arr = arr.reshape(height, stride_bytes)[:, :width * 4].reshape(height, width, 4)
+            # BGRA -> BGR (供 OpenCV/Qt 使用)
+            bgr = arr[:, :, :3]
+            rgb = bgr[:, :, ::-1]
+            # 应用翻转（与只读控件状态一致）
+            if self.window.flip_horizontal_checkbox.isChecked() and self.window.flip_vertical_checkbox.isChecked():
+                rgb = cv2.flip(rgb, -1)
+            elif self.window.flip_horizontal_checkbox.isChecked():
+                rgb = cv2.flip(rgb, 1)
+            elif self.window.flip_vertical_checkbox.isChecked():
+                rgb = cv2.flip(rgb, 0)
+            rgb = np.ascontiguousarray(rgb)
+            h, w, _ = rgb.shape
+            qt_image = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+            pixmap = QPixmap.fromImage(qt_image)
+            scaled = pixmap.scaled(
+                self.window.video_label.size(),
+                Qt.AlignmentFlag.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self.window.video_label.setPixmap(scaled)
+        except Exception as e:
+            logger.error("Display raw frame error: %s", e)
 
     def _get_local_ip(self) -> str:
         try:
@@ -104,7 +158,14 @@ class PhoneCamApp(QObject):
         except Exception as e:
             logger.warning("Failed to start discovery service: %s", e)
 
-        # 3. 自动建立 PeerConnection 并连入本地信令房间，等待 iOS offer
+        # 3. 启动原画质 UDP 接收器（等待 iOS 端推流）
+        try:
+            await self.raw_receiver.start()
+            self.status_changed.emit(f"原画质接收器已监听 :{RAW_STREAM_PORT}")
+        except Exception as e:
+            logger.warning("Failed to start raw stream receiver: %s", e)
+
+        # 4. 自动建立 PeerConnection 并连入本地信令房间，等待 iOS offer
         await self._auto_connect_local(ws_url, DEFAULT_ROOM)
 
     async def _auto_connect_local(self, ws_url: str, room_id: str):
@@ -151,8 +212,9 @@ class PhoneCamApp(QObject):
         self.window.set_connect_state(connected=False, auto_mode=self._auto_started)
 
     @asyncSlot(dict)
-    async def _on_settings_changed(self, settings: dict):
-        logger.info("Settings changed: %s", settings)
+    async def _on_remote_settings(self, settings: dict):
+        """接收 iPhone 端推送的采集参数，更新虚拟设备格式与只读 UI 显示。"""
+        logger.info("Remote settings from iOS: %s", settings)
         width = settings.get("width", 1280)
         height = settings.get("height", 720)
         fps = settings.get("fps", 30)
@@ -161,7 +223,7 @@ class PhoneCamApp(QObject):
             settings.get("flip_horizontal", False),
             settings.get("flip_vertical", False),
         )
-        await self.peer.update_settings(settings)
+        self.window.apply_remote_settings(settings)
 
     @asyncSlot(bool)
     async def _on_virtual_camera_toggled(self, enabled: bool):
@@ -198,23 +260,11 @@ class PhoneCamApp(QObject):
         if state == "connected":
             self.status_changed.emit("已连接，正在接收视频")
             self.window.set_connect_state(connected=True, auto_mode=self._auto_started)
-            # 连接建立后主动推送一次当前配置，确保 iOS 端拿到最新参数
-            last = self._collect_current_settings()
-            if last:
-                asyncio.create_task(self.peer.push_settings(last))
         elif state in ("disconnected", "failed", "closed"):
             self.status_changed.emit(f"连接{state}")
             self.window.set_connect_state(connected=False, auto_mode=self._auto_started)
         else:
             self.status_changed.emit(f"连接状态: {state}")
-
-    def _collect_current_settings(self) -> dict | None:
-        """从 UI 当前控件状态收集配置快照。"""
-        try:
-            return self.window.collect_settings()
-        except Exception as e:
-            logger.warning("Collect settings failed: %s", e)
-            return None
 
     async def shutdown(self):
         """应用退出时清理所有资源。"""
@@ -234,6 +284,10 @@ class PhoneCamApp(QObject):
             self.discovery.stop()
         except Exception as e:
             logger.warning("Discovery stop error: %s", e)
+        try:
+            await self.raw_receiver.stop()
+        except Exception as e:
+            logger.warning("Raw receiver stop error: %s", e)
         try:
             self.virtual_camera.disable()
             self.virtual_audio.disable()

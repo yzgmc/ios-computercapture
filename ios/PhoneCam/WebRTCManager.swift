@@ -24,14 +24,14 @@ class WebRTCManager: NSObject, ObservableObject {
 
     @Published var statusMessage = "未连接"
     @Published var connectionState: ConnectionState = .idle
-    /// 桌面端推送过来的只读配置快照，供 UI 显示
-    @Published var remoteSettings: [String: Any] = [:]
 
     private var peerConnection: RTCPeerConnection?
     private let factory: RTCPeerConnectionFactory
     private var signalingClient: SignalingClient?
     private var targetResolution: CaptureResolution?
     private var remoteDataChannel: RTCDataChannel?
+    /// 最近一次采集参数快照，data channel 就绪后主动推送给桌面端
+    private var pendingSettings: [String: Any]?
 
     private let iceServers = [
         RTCIceServer(urlStrings: ["stun:stun.l.google.com:19302"])
@@ -159,12 +159,6 @@ class WebRTCManager: NSObject, ObservableObject {
                                                sdpMLineIndex: sdpMLineIndex,
                                                sdpMid: sdpMid)
             try? await peerConnection?.add(iceCandidate)
-        } else if type == "settings" {
-            // 信令通道兜底：data channel 未就绪时桌面端通过信令推送配置
-            if let settings = message["settings"] as? [String: Any] {
-                remoteSettings = settings
-                print("Received settings via signaling: \(settings)")
-            }
         }
     }
 
@@ -176,6 +170,22 @@ class WebRTCManager: NSObject, ObservableObject {
         signalingClient = nil
         statusMessage = "已断开"
         connectionState = .disconnected
+    }
+
+    /// 将采集参数推送到桌面端。优先 data channel，未就绪时回退信令通道。
+    func sendSettings(_ settings: [String: Any]) {
+        pendingSettings = settings
+        let payload: [String: Any] = ["type": "settings", "settings": settings]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        let buffer = RTCDataBuffer(data: data, isBinary: false)
+        if let channel = remoteDataChannel, channel.readyState == .open {
+            channel.sendData(buffer)
+            print("Settings pushed via data channel: \(settings)")
+        } else {
+            // data channel 未就绪，走信令通道兜底
+            Task { await signalingClient?.send(message: payload) }
+            print("Settings pushed via signaling: \(settings)")
+        }
     }
 }
 
@@ -220,10 +230,14 @@ extension WebRTCManager: RTCPeerConnectionDelegate {
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection,
                                     didOpen dataChannel: RTCDataChannel) {
         Task { @MainActor in
-            // 接收桌面端创建的 settings data channel，监听配置推送
+            // 接收桌面端创建的 settings data channel，用于向桌面端推送采集参数
             self.remoteDataChannel = dataChannel
             dataChannel.delegate = self
             print("Remote data channel opened: \(dataChannel.label)")
+            // data channel 就绪后主动推送一次最新配置，确保桌面端拿到当前参数
+            if let settings = self.pendingSettings {
+                self.sendSettings(settings)
+            }
         }
     }
 
@@ -240,18 +254,10 @@ extension WebRTCManager: RTCDataChannelDelegate {
 
     nonisolated func dataChannel(_ dataChannel: RTCDataChannel,
                                  didReceiveMessageWith buffer: RTCDataBuffer) {
-        guard let text = String(data: buffer.data, encoding: .utf8) else { return }
-        guard let data = text.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            print("Invalid JSON from data channel")
-            return
-        }
-        Task { @MainActor in
-            if json["type"] as? String == "settings",
-               let settings = json["settings"] as? [String: Any] {
-                self.remoteSettings = settings
-                print("Received settings via data channel: \(settings)")
-            }
+        // 控制方向已反转：采集参数由 iPhone 端发出，桌面端只读。
+        // 桌面端不再通过 data channel 下发配置，此处仅记录非预期消息便于排查。
+        if let text = String(data: buffer.data, encoding: .utf8) {
+            print("Unexpected data channel message from desktop: \(text)")
         }
     }
 }

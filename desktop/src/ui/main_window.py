@@ -16,7 +16,6 @@ logger = logging.getLogger(__name__)
 class MainWindow(QMainWindow):
     connect_requested = pyqtSignal(str, str)
     disconnect_requested = pyqtSignal()
-    settings_changed = pyqtSignal(dict)
     virtual_camera_toggled = pyqtSignal(bool)
     virtual_audio_toggled = pyqtSignal(bool)
 
@@ -65,38 +64,43 @@ class MainWindow(QMainWindow):
 
         control_layout.addWidget(connection_group)
 
-        # 视频参数
-        video_group = QGroupBox("视频参数")
+        # 视频参数（由 iPhone 端控制，桌面端只读显示）
+        video_group = QGroupBox("视频参数（由 iPhone 控制 · 只读）")
         video_layout = QVBoxLayout(video_group)
 
         video_layout.addWidget(QLabel("分辨率"))
         self.resolution_combo = QComboBox()
         self.resolution_combo.addItems(["3840x2160", "2560x1440", "1920x1080", "1280x720", "640x480", "320x240"])
+        self.resolution_combo.setEnabled(False)
         video_layout.addWidget(self.resolution_combo)
 
         video_layout.addWidget(QLabel("帧率"))
         self.fps_slider = QSlider(Qt.Orientation.Horizontal)
         self.fps_slider.setRange(15, 60)
         self.fps_slider.setValue(30)
+        self.fps_slider.setEnabled(False)
         self.fps_label = QLabel("30 fps")
         video_layout.addWidget(self.fps_slider)
         video_layout.addWidget(self.fps_label)
 
         self.flip_horizontal_checkbox = QCheckBox("水平翻转")
         self.flip_vertical_checkbox = QCheckBox("垂直翻转")
+        self.flip_horizontal_checkbox.setEnabled(False)
+        self.flip_vertical_checkbox.setEnabled(False)
         video_layout.addWidget(self.flip_horizontal_checkbox)
         video_layout.addWidget(self.flip_vertical_checkbox)
 
         control_layout.addWidget(video_group)
 
-        # 音频参数
-        audio_group = QGroupBox("音频参数")
+        # 音频参数（由 iPhone 端控制，桌面端只读显示）
+        audio_group = QGroupBox("音频参数（由 iPhone 控制 · 只读）")
         audio_layout = QVBoxLayout(audio_group)
 
         audio_layout.addWidget(QLabel("音量"))
         self.volume_slider = QSlider(Qt.Orientation.Horizontal)
         self.volume_slider.setRange(0, 100)
         self.volume_slider.setValue(80)
+        self.volume_slider.setEnabled(False)
         self.volume_label = QLabel("80%")
         audio_layout.addWidget(self.volume_slider)
         audio_layout.addWidget(self.volume_label)
@@ -129,12 +133,6 @@ class MainWindow(QMainWindow):
         self.connect_button.clicked.connect(self._on_connect)
         self.disconnect_button.clicked.connect(self._on_disconnect)
 
-        self.resolution_combo.currentTextChanged.connect(self._on_settings_changed)
-        self.fps_slider.valueChanged.connect(self._on_fps_changed)
-        self.volume_slider.valueChanged.connect(self._on_volume_changed)
-        self.flip_horizontal_checkbox.stateChanged.connect(self._on_settings_changed)
-        self.flip_vertical_checkbox.stateChanged.connect(self._on_settings_changed)
-
         self.virtual_camera_button.toggled.connect(self.virtual_camera_toggled.emit)
         self.virtual_audio_button.toggled.connect(self.virtual_audio_toggled.emit)
 
@@ -151,37 +149,40 @@ class MainWindow(QMainWindow):
         self.connect_button.setEnabled(True)
         self.disconnect_button.setEnabled(False)
 
-    def _on_fps_changed(self, value: int):
-        self.fps_label.setText(f"{value} fps")
-        self._on_settings_changed()
+    def apply_remote_settings(self, settings: dict):
+        """应用 iPhone 端推送的采集参数到只读控件（不触发信号）。"""
+        width = settings.get("width")
+        height = settings.get("height")
+        fps = settings.get("fps")
+        volume = settings.get("volume")
+        flip_h = settings.get("flip_horizontal")
+        flip_v = settings.get("flip_vertical")
 
-    def _on_volume_changed(self, value: int):
-        self.volume_label.setText(f"{value}%")
-        self._on_settings_changed()
+        # 临时阻塞信号，避免程序化设值触发 settings_changed
+        for w in (self.resolution_combo, self.fps_slider, self.volume_slider,
+                  self.flip_horizontal_checkbox, self.flip_vertical_checkbox):
+            w.blockSignals(True)
 
-    def _on_settings_changed(self):
-        width, height = map(int, self.resolution_combo.currentText().split("x"))
-        settings = {
-            "width": width,
-            "height": height,
-            "fps": self.fps_slider.value(),
-            "volume": self.volume_slider.value() / 100.0,
-            "flip_horizontal": self.flip_horizontal_checkbox.isChecked(),
-            "flip_vertical": self.flip_vertical_checkbox.isChecked(),
-        }
-        self.settings_changed.emit(settings)
-
-    def collect_settings(self) -> dict:
-        """收集当前 UI 控件状态作为配置快照，供连接建立时主动推送。"""
-        width, height = map(int, self.resolution_combo.currentText().split("x"))
-        return {
-            "width": width,
-            "height": height,
-            "fps": self.fps_slider.value(),
-            "volume": self.volume_slider.value() / 100.0,
-            "flip_horizontal": self.flip_horizontal_checkbox.isChecked(),
-            "flip_vertical": self.flip_vertical_checkbox.isChecked(),
-        }
+        try:
+            if width and height:
+                text = f"{int(width)}x{int(height)}"
+                idx = self.resolution_combo.findText(text)
+                if idx >= 0:
+                    self.resolution_combo.setCurrentIndex(idx)
+            if fps is not None:
+                self.fps_slider.setValue(int(fps))
+                self.fps_label.setText(f"{int(fps)} fps")
+            if volume is not None:
+                self.volume_slider.setValue(int(float(volume) * 100))
+                self.volume_label.setText(f"{int(float(volume) * 100)}%")
+            if flip_h is not None:
+                self.flip_horizontal_checkbox.setChecked(bool(flip_h))
+            if flip_v is not None:
+                self.flip_vertical_checkbox.setChecked(bool(flip_v))
+        finally:
+            for w in (self.resolution_combo, self.fps_slider, self.volume_slider,
+                      self.flip_horizontal_checkbox, self.flip_vertical_checkbox):
+                w.blockSignals(False)
 
     def update_video_frame(self, frame):
         """frame 为 aiortc 的 VideoFrame"""
