@@ -111,8 +111,6 @@ class CaptureManager: NSObject, ObservableObject {
         captureSession.beginConfiguration()
 
         do {
-            captureSession.sessionPreset = .high
-
             guard let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera,
                                                             for: .video,
                                                             position: .back) else {
@@ -129,6 +127,20 @@ class CaptureManager: NSObject, ObservableObject {
             }
             if let bestFormat = matchingFormats.min(by: { $0.1.width * $0.1.height < $1.1.width * $1.1.height }) {
                 videoDevice.activeFormat = bestFormat.0
+                captureSession.sessionPreset = .inputPriority
+                print("Selected format: \(bestFormat.1.width)x\(bestFormat.1.height)")
+            } else {
+                // 没有完全匹配目标的分辨率，使用设备支持的最高格式
+                if let highestFormat = videoDevice.formats.max(by: {
+                    let s1 = CMVideoFormatDescriptionGetDimensions($0.formatDescription)
+                    let s2 = CMVideoFormatDescriptionGetDimensions($1.formatDescription)
+                    return s1.width * s1.height < s2.width * s2.height
+                }) {
+                    videoDevice.activeFormat = highestFormat
+                    captureSession.sessionPreset = .inputPriority
+                    let size = CMVideoFormatDescriptionGetDimensions(highestFormat.formatDescription)
+                    print("Fallback to highest format: \(size.width)x\(size.height)")
+                }
             }
             videoDevice.activeVideoMinFrameDuration = CMTime(value: 1, timescale: CMTimeScale(fps))
             videoDevice.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: CMTimeScale(fps))

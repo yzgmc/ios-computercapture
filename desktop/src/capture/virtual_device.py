@@ -23,6 +23,9 @@ class VirtualCameraOutput:
         self.flip_vertical = False
         self.enabled = False
         self._cam = None
+        self._queue: queue.Queue = queue.Queue(maxsize=2)
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
 
     def enable(self):
         try:
@@ -31,6 +34,8 @@ class VirtualCameraOutput:
                                             height=self.height,
                                             fps=self.fps)
             self.enabled = True
+            self._thread = threading.Thread(target=self._worker, daemon=True)
+            self._thread.start()
             logger.info("Virtual camera started: %s", self._cam.device)
         except Exception as e:
             logger.error("Failed to start virtual camera: %s", e)
@@ -38,32 +43,59 @@ class VirtualCameraOutput:
 
     def disable(self):
         self.enabled = False
+        # 清空队列，唤醒工作线程
+        try:
+            while True:
+                self._queue.get_nowait()
+        except queue.Empty:
+            pass
+        if self._thread:
+            self._thread.join(timeout=1.0)
+            self._thread = None
         if self._cam:
             self._cam.close()
             self._cam = None
             logger.info("Virtual camera stopped")
 
+    def _worker(self):
+        import cv2
+        while self.enabled:
+            try:
+                frame = self._queue.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            try:
+                img = frame.to_ndarray(format="rgb24")
+                with self._lock:
+                    flip_h = self.flip_horizontal
+                    flip_v = self.flip_vertical
+                    target_w = self.width
+                    target_h = self.height
+                if flip_h and flip_v:
+                    img = cv2.flip(img, -1)
+                elif flip_h:
+                    img = cv2.flip(img, 1)
+                elif flip_v:
+                    img = cv2.flip(img, 0)
+                if img.shape[0] != target_h or img.shape[1] != target_w:
+                    img = cv2.resize(img, (target_w, target_h))
+                self._cam.send(img)
+                self._cam.sleep_until_next_frame()
+            except Exception as e:
+                logger.error("Virtual camera worker error: %s", e)
+
     def send_frame(self, frame):
-        if not self.enabled or self._cam is None:
+        if not self.enabled:
             return
         try:
-            import cv2
-            # aiortc VideoFrame 转换为 RGB numpy 数组
-            img = frame.to_ndarray(format="rgb24")
-            # 翻转
-            if self.flip_horizontal and self.flip_vertical:
-                img = cv2.flip(img, -1)
-            elif self.flip_horizontal:
-                img = cv2.flip(img, 1)
-            elif self.flip_vertical:
-                img = cv2.flip(img, 0)
-            # 缩放到虚拟摄像头目标尺寸（保持 RGB）
-            if img.shape[0] != self.height or img.shape[1] != self.width:
-                img = cv2.resize(img, (self.width, self.height))
-            self._cam.send(img)
-            self._cam.sleep_until_next_frame()
-        except Exception as e:
-            logger.error("Virtual camera send frame error: %s", e)
+            self._queue.put_nowait(frame)
+        except queue.Full:
+            # 丢弃最旧帧，保持实时性
+            try:
+                self._queue.get_nowait()
+                self._queue.put_nowait(frame)
+            except queue.Empty:
+                pass
 
     def update_format(self, width: int, height: int, fps: int):
         need_restart = self.enabled and (width != self.width or height != self.height or fps != self.fps)
@@ -75,8 +107,9 @@ class VirtualCameraOutput:
             self.enable()
 
     def update_flip(self, horizontal: bool, vertical: bool):
-        self.flip_horizontal = horizontal
-        self.flip_vertical = vertical
+        with self._lock:
+            self.flip_horizontal = horizontal
+            self.flip_vertical = vertical
 
 
 class VirtualAudioOutput:

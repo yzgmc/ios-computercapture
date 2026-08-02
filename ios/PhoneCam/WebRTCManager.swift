@@ -57,6 +57,15 @@ class WebRTCManager: NSObject, ObservableObject {
             peerConnection?.add(audioTrack, streamIds: ["stream0"])
         }
 
+        // 优先使用 H.264 硬件编码，画质与兼容性更好
+        if let videoTransceiver = peerConnection?.transceivers.first(where: { $0.mediaType == .video }) {
+            let h264Codecs = videoTransceiver.codecCapabilities.filter { $0.name == "H264" }
+            if !h264Codecs.isEmpty {
+                videoTransceiver.setCodecPreferences(h264Codecs)
+                print("Preferred H.264 codecs: \(h264Codecs.map { $0.name })")
+            }
+        }
+
         let offerConstraints = RTCMediaConstraints(mandatoryConstraints: [
             kRTCMediaConstraintsOfferToReceiveAudio: kRTCMediaConstraintsValueTrue,
             kRTCMediaConstraintsOfferToReceiveVideo: kRTCMediaConstraintsValueTrue,
@@ -103,9 +112,9 @@ class WebRTCManager: NSObject, ObservableObject {
                 let targetBitrate: Int
                 switch targetResolution {
                 case .p4K:
-                    targetBitrate = 25_000_000
+                    targetBitrate = 20_000_000
                 case .p2K:
-                    targetBitrate = 15_000_000
+                    targetBitrate = 12_000_000
                 case .p1080:
                     targetBitrate = 8_000_000
                 case .p720, .p480, .p240:
@@ -113,10 +122,15 @@ class WebRTCManager: NSObject, ObservableObject {
                 case .none:
                     targetBitrate = 8_000_000
                 }
-                for encoding in params.encodings {
-                    encoding.maxBitrateBps = NSNumber(value: targetBitrate)
+                if params.encodings.isEmpty {
+                    print("Warning: no video encodings found")
+                } else {
+                    for encoding in params.encodings {
+                        encoding.maxBitrateBps = NSNumber(value: targetBitrate)
+                    }
+                    sender.parameters = params
+                    print("Configured video max bitrate: \(targetBitrate / 1_000_000) Mbps")
                 }
-                sender.parameters = params
             }
             statusMessage = "WebRTC 连接已建立"
         } else if type == "ice",
