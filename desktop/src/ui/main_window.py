@@ -171,6 +171,18 @@ class MainWindow(QMainWindow):
         }
         self.settings_changed.emit(settings)
 
+    def collect_settings(self) -> dict:
+        """收集当前 UI 控件状态作为配置快照，供连接建立时主动推送。"""
+        width, height = map(int, self.resolution_combo.currentText().split("x"))
+        return {
+            "width": width,
+            "height": height,
+            "fps": self.fps_slider.value(),
+            "volume": self.volume_slider.value() / 100.0,
+            "flip_horizontal": self.flip_horizontal_checkbox.isChecked(),
+            "flip_vertical": self.flip_vertical_checkbox.isChecked(),
+        }
+
     def update_video_frame(self, frame):
         """frame 为 aiortc 的 VideoFrame"""
         try:

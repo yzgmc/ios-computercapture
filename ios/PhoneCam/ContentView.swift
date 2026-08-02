@@ -18,9 +18,6 @@ struct ContentView: View {
     @State private var roomID = "room1"
     @State private var isConnected = false
 
-    // 跟踪当前设备尺寸类别，用于响应式布局
-    @Environment(\.verticalSizeClass) private var verticalSizeClass
-
     var body: some View {
         NavigationView {
             GeometryReader { geometry in
@@ -32,7 +29,7 @@ struct ContentView: View {
                         VStack(spacing: 16) {
                             previewCard(in: geometry)
                             connectionCard()
-                            parametersCard()
+                            remoteSettingsCard()
                             statusBar()
                         }
                         .padding(.horizontal)
@@ -52,6 +49,8 @@ struct ContentView: View {
     }
 
     // MARK: - 摄像头预览卡片
+    // WebRTC 连接成功后（connectionState == .connected），
+    // 不再显示任何视频画面，仅保留连接状态文字指示。
     @ViewBuilder
     private func previewCard(in geometry: GeometryProxy) -> some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -72,12 +71,35 @@ struct ContentView: View {
                     .clipShape(Capsule())
             }
 
-            // 按摄像头实际输出比例渲染预览，撑满卡片宽度，高度由比例自然得出
-            CameraPreviewView(captureManager: captureManager)
+            if webRTCManager.connectionState == .connected {
+                // 连接已建立：仅显示连接状态文字指示，不显示视频画面
+                ZStack {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(Color.black.opacity(0.9))
+                    VStack(spacing: 12) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 48))
+                            .foregroundStyle(Color.green)
+                        Text("Connected")
+                            .font(.title2.bold())
+                            .foregroundStyle(Color.white)
+                        Text("视频画面已隐藏")
+                            .font(.footnote)
+                            .foregroundStyle(Color.white.opacity(0.6))
+                    }
+                }
                 .frame(maxWidth: .infinity)
                 .frame(height: previewHeight(for: geometry.size.width - 32))
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 .shadow(color: .black.opacity(0.08), radius: 8, x: 0, y: 4)
+            } else {
+                // 未连接时仍展示本地预览，方便用户确认摄像头工作正常
+                CameraPreviewView(captureManager: captureManager)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: previewHeight(for: geometry.size.width - 32))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .shadow(color: .black.opacity(0.08), radius: 8, x: 0, y: 4)
+            }
         }
         .padding()
         .background(Color.cardBackground)
@@ -86,6 +108,8 @@ struct ContentView: View {
     }
 
     // MARK: - 连接设置卡片
+    // 服务器地址与房间 ID 仍允许编辑，因为这是建立连接必需的输入。
+    // 建立连接后这些字段会被禁用，避免误改。
     @ViewBuilder
     private func connectionCard() -> some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -100,6 +124,7 @@ struct ContentView: View {
                     .autocapitalization(.none)
                     .disableAutocorrection(true)
                     .keyboardType(.URL)
+                    .disabled(isConnected)
             }
 
             Divider()
@@ -114,6 +139,7 @@ struct ContentView: View {
                     .textFieldStyle(.roundedBorder)
                     .autocapitalization(.none)
                     .disableAutocorrection(true)
+                    .disabled(isConnected)
             }
         }
         .padding()
@@ -122,79 +148,79 @@ struct ContentView: View {
         .shadow(color: .black.opacity(0.04), radius: 12, x: 0, y: 6)
     }
 
-    // MARK: - 参数控制卡片
+    // MARK: - 远端配置卡片（只读）
+    // 所有音视频/翻转参数均由桌面端推送，iPhone 端只显示，不可编辑。
     @ViewBuilder
-    private func parametersCard() -> some View {
+    private func remoteSettingsCard() -> some View {
         VStack(alignment: .leading, spacing: 16) {
-            sectionHeader(icon: "slider.horizontal.3", title: "采集参数")
-
-            VStack(alignment: .leading, spacing: 10) {
-                Text("分辨率")
-                    .font(.subheadline)
+            HStack(spacing: 8) {
+                Image(systemName: "lock.fill")
                     .foregroundStyle(Color.secondaryText)
-
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 10) {
-                        ForEach(CaptureResolution.allCases) { resolution in
-                            Button(action: {
-                                captureManager.selectedResolution = resolution
-                            }) {
-                                Text(resolution.label)
-                                    .font(.subheadline)
-                                    .fontWeight(.semibold)
-                                    .lineLimit(1)
-                                    .minimumScaleFactor(0.8)
-                                    .foregroundStyle(
-                                        captureManager.selectedResolution == resolution
-                                            ? Color.white
-                                            : Color.primaryText
-                                    )
-                                    .padding(.horizontal, 14)
-                                    .padding(.vertical, 8)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                            .fill(
-                                                captureManager.selectedResolution == resolution
-                                                    ? Color.accentColor
-                                                    : Color(uiColor: UIColor.tertiarySystemFill)
-                                            )
-                                    )
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                }
+                    .frame(width: 22)
+                Text("采集参数（由桌面端控制 · 只读）")
+                    .font(.headline)
+                    .foregroundStyle(Color.primaryText)
+                Spacer()
             }
 
             Divider()
 
-            sliderRow(
-                icon: "film",
-                label: "帧率",
-                value: .init(
-                    get: { Double(captureManager.fps) },
-                    set: { captureManager.fps = Int($0) }
-                ),
-                range: 15...60,
-                step: 1,
-                display: "\(captureManager.fps) FPS"
-            )
-
+            readOnlyRow(label: "分辨率", value: resolutionDisplayText)
             Divider()
-
-            sliderRow(
-                icon: "speaker.wave.2.fill",
-                label: "音量",
-                value: $captureManager.volume,
-                range: 0...1,
-                step: 0.01,
-                display: "\(Int(captureManager.volume * 100))%"
-            )
+            readOnlyRow(label: "帧率", value: fpsDisplayText)
+            Divider()
+            readOnlyRow(label: "音量", value: volumeDisplayText)
+            Divider()
+            readOnlyRow(label: "水平翻转", value: flipDisplayText(key: "flip_horizontal"))
+            Divider()
+            readOnlyRow(label: "垂直翻转", value: flipDisplayText(key: "flip_vertical"))
         }
         .padding()
         .background(Color.cardBackground)
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .shadow(color: .black.opacity(0.04), radius: 12, x: 0, y: 6)
+    }
+
+    private func readOnlyRow(label: String, value: String) -> some View {
+        HStack {
+            Text(label)
+                .font(.subheadline)
+                .foregroundStyle(Color.secondaryText)
+            Spacer()
+            Text(value)
+                .font(.subheadline.bold())
+                .monospacedDigit()
+                .foregroundStyle(Color.primaryText)
+        }
+    }
+
+    private var resolutionDisplayText: String {
+        if let w = webRTCManager.remoteSettings["width"] as? Int,
+           let h = webRTCManager.remoteSettings["height"] as? Int {
+            return "\(w)x\(h)"
+        }
+        return "\(Int(captureManager.selectedResolution.size.width))x\(Int(captureManager.selectedResolution.size.height))"
+    }
+
+    private var fpsDisplayText: String {
+        if let fps = webRTCManager.remoteSettings["fps"] as? Int {
+            return "\(fps) FPS"
+        }
+        return "\(captureManager.fps) FPS"
+    }
+
+    private var volumeDisplayText: String {
+        if let volume = webRTCManager.remoteSettings["volume"] as? Double {
+            return "\(Int(volume * 100))%"
+        }
+        return "\(Int(captureManager.volume * 100))%"
+    }
+
+    private func flipDisplayText(key: String) -> String {
+        if let flag = webRTCManager.remoteSettings[key] as? Bool {
+            return flag ? "开启" : "关闭"
+        }
+        return "关闭"
     }
 
     // MARK: - 状态栏
@@ -256,62 +282,26 @@ struct ContentView: View {
         }
     }
 
-    private func sliderRow(icon: String,
-                           label: String,
-                           value: Binding<Double>,
-                           range: ClosedRange<Double>,
-                           step: Double,
-                           display: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: icon)
-                    .foregroundStyle(Color.secondaryText)
-                    .frame(width: 24)
-                Text(label)
-                    .font(.subheadline)
-                    .foregroundStyle(Color.secondaryText)
-                Spacer()
-                Text(display)
-                    .font(.subheadline)
-                    .fontWeight(.semibold)
-                    .monospacedDigit()
-                    .foregroundStyle(Color.accentColor)
-            }
-
-            Slider(value: value, in: range, step: step)
-                .tint(Color.accentColor)
-        }
-    }
-
     // MARK: - 响应式尺寸计算
-    // 使用摄像头实际输出尺寸计算比例，避免与预览层不匹配产生黑边/拉伸
     private var previewAspectRatio: CGFloat {
         let size = captureManager.actualCaptureSize
         guard size.height > 0 else { return 16.0 / 9.0 }
         return size.width / size.height
     }
 
-    /// 根据卡片可用宽度计算预览高度，按实际采集比例换算。
-    /// 不再硬性卡死在 0.38 屏高，而是允许预览占据更合理的空间。
     private func previewHeight(for cardWidth: CGFloat) -> CGFloat {
         let naturalHeight = cardWidth / previewAspectRatio
-        // 横屏时限制略紧，竖屏时放宽让预览成为界面主体
-        let maxHeightRatio: CGFloat = verticalSizeClass == .compact ? 0.55 : 0.62
-        let screenHeight = UIScreen.main.bounds.height
-        let maxHeight = screenHeight * maxHeightRatio
-        return min(naturalHeight, maxHeight)
+        return min(naturalHeight, UIScreen.main.bounds.height * 0.55)
     }
 
     private var statusColor: Color {
-        switch webRTCManager.statusMessage {
-        case "WebRTC 已连接":
+        switch webRTCManager.connectionState {
+        case .connected:
             return .green
-        case "已连接信令服务器", "等待电脑端响应...":
+        case .connecting:
             return .orange
-        case "未连接", "已断开":
+        case .disconnected, .failed, .idle:
             return .gray
-        default:
-            return .secondary
         }
     }
 

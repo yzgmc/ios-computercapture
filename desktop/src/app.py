@@ -198,11 +198,23 @@ class PhoneCamApp(QObject):
         if state == "connected":
             self.status_changed.emit("已连接，正在接收视频")
             self.window.set_connect_state(connected=True, auto_mode=self._auto_started)
+            # 连接建立后主动推送一次当前配置，确保 iOS 端拿到最新参数
+            last = self._collect_current_settings()
+            if last:
+                asyncio.create_task(self.peer.push_settings(last))
         elif state in ("disconnected", "failed", "closed"):
             self.status_changed.emit(f"连接{state}")
             self.window.set_connect_state(connected=False, auto_mode=self._auto_started)
         else:
             self.status_changed.emit(f"连接状态: {state}")
+
+    def _collect_current_settings(self) -> dict | None:
+        """从 UI 当前控件状态收集配置快照。"""
+        try:
+            return self.window.collect_settings()
+        except Exception as e:
+            logger.warning("Collect settings failed: %s", e)
+            return None
 
     async def shutdown(self):
         """应用退出时清理所有资源。"""
