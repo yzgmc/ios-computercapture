@@ -72,6 +72,16 @@ jobs:
           gem install cocoapods
           pod install --repo-update
 
+      - name: Check Pods signing settings
+        working-directory: ios
+        run: |
+          xcodebuild -showBuildSettings \
+            -workspace PhoneCam.xcworkspace \
+            -scheme PhoneCam \
+            -sdk iphoneos \
+            -target Pods-PhoneCam \
+            | grep -E 'CODE_SIGN|PROVISIONING_PROFILE|DEVELOPMENT_TEAM' || true
+
       - name: Install signing certificate
         env:
           BUILD_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
