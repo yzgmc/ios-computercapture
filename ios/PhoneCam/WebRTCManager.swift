@@ -99,7 +99,7 @@ class WebRTCManager: NSObject, ObservableObject {
             // 配置视频编码参数：优先保持分辨率，并按目标分辨率设置较高码率
             if let sender = peerConnection?.senders.first(where: { $0.track?.kind == "video" }) {
                 let params = sender.parameters
-                params.degradationPreference = .maintainResolution
+                params.degradationPreference = NSNumber(value: RTCDegradationPreference.maintainResolution.rawValue)
                 let targetBitrate: Int
                 switch targetResolution {
                 case .p4K:
