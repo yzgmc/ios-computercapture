@@ -57,10 +57,10 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 Image(systemName: "video.fill")
-                    .foregroundStyle(.accent)
+                    .foregroundStyle(Color.accentColor)
                 Text("实时预览")
                     .font(.headline)
-                    .foregroundStyle(.primaryText)
+                    .foregroundStyle(Color.primaryText)
                 Spacer()
                 Text(captureManager.selectedResolution.label)
                     .font(.caption)
@@ -68,7 +68,7 @@ struct ContentView: View {
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
                     .background(Color.accentColor.opacity(0.12))
-                    .foregroundStyle(.accent)
+                    .foregroundStyle(Color.accentColor)
                     .clipShape(Capsule())
             }
 
@@ -98,7 +98,7 @@ struct ContentView: View {
 
             HStack(spacing: 12) {
                 Image(systemName: "link")
-                    .foregroundStyle(.secondaryText)
+                    .foregroundStyle(Color.secondaryText)
                     .frame(width: 24)
                 TextField("ws://...", text: $serverURL)
                     .textFieldStyle(.roundedBorder)
@@ -113,7 +113,7 @@ struct ContentView: View {
 
             HStack(spacing: 12) {
                 Image(systemName: "number")
-                    .foregroundStyle(.secondaryText)
+                    .foregroundStyle(Color.secondaryText)
                     .frame(width: 24)
                 TextField("room1", text: $roomID)
                     .textFieldStyle(.roundedBorder)
@@ -136,7 +136,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("分辨率")
                     .font(.subheadline)
-                    .foregroundStyle(.secondaryText)
+                    .foregroundStyle(Color.secondaryText)
                 Picker("分辨率", selection: $captureManager.selectedResolution) {
                     ForEach(CaptureResolution.allCases) { resolution in
                         Text(resolution.label).tag(resolution)
@@ -187,7 +187,7 @@ struct ContentView: View {
 
             Text(webRTCManager.statusMessage)
                 .font(.footnote)
-                .foregroundStyle(.secondaryText)
+                .foregroundStyle(Color.secondaryText)
 
             Spacer()
         }
@@ -226,11 +226,11 @@ struct ContentView: View {
     private func sectionHeader(icon: String, title: String) -> some View {
         HStack(spacing: 8) {
             Image(systemName: icon)
-                .foregroundStyle(.accent)
+                .foregroundStyle(Color.accentColor)
                 .frame(width: 22)
             Text(title)
                 .font(.headline)
-                .foregroundStyle(.primaryText)
+                .foregroundStyle(Color.primaryText)
             Spacer()
         }
     }
@@ -244,21 +244,21 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Image(systemName: icon)
-                    .foregroundStyle(.secondaryText)
+                    .foregroundStyle(Color.secondaryText)
                     .frame(width: 24)
                 Text(label)
                     .font(.subheadline)
-                    .foregroundStyle(.secondaryText)
+                    .foregroundStyle(Color.secondaryText)
                 Spacer()
                 Text(display)
                     .font(.subheadline)
                     .fontWeight(.semibold)
                     .monospacedDigit()
-                    .foregroundStyle(.accent)
+                    .foregroundStyle(Color.accentColor)
             }
 
             Slider(value: value, in: range, step: step)
-                .tint(.accent)
+                .tint(Color.accentColor)
         }
     }
 
