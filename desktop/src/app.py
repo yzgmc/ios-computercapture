@@ -12,6 +12,7 @@ from capture.virtual_device import (
 )
 from raw_stream import RawStreamReceiver, PixelFormat
 from audio_stream import AudioStreamReceiver, AudioPlayer
+from discovery import DiscoveryService
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,7 @@ class PhoneCamApp(QObject):
         self.status_changed.connect(self.window.set_status)
 
         self.virtual_camera = VirtualCameraOutput()
+        self.discovery = None  # start() 中创建
 
         # UDP 音频播放器：默认输出到虚拟音频设备（VB-Cable），
         # 用户在 UI 中切换"启动虚拟麦克风"时 start/stop。
@@ -102,11 +104,12 @@ class PhoneCamApp(QObject):
             if self.virtual_camera.enabled:
                 self.virtual_camera.send_ndarray(rgb)
             h, w, _ = rgb.shape
-            qt_image = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+            # 必须 copy()，否则 QImage 持有的指针在 rgb 被回收后悬空
+            qt_image = QImage(rgb.copy(), w, h, 3 * w, QImage.Format.Format_RGB888)
             pixmap = QPixmap.fromImage(qt_image)
             scaled = pixmap.scaled(
                 self.window.video_label.size(),
-                Qt.AlignmentFlag.KeepAspectRatio,
+                Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
             self.window.video_label.setPixmap(scaled)
@@ -196,6 +199,11 @@ class PhoneCamApp(QObject):
             await self.audio_receiver.stop()
         except Exception as e:
             logger.warning("Audio receiver stop error: %s", e)
+        if self.discovery:
+            try:
+                await self.discovery.stop()
+            except Exception as e:
+                logger.warning("Discovery stop error: %s", e)
         try:
             self.audio_player.stop()
         except Exception as e:

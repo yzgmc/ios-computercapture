@@ -18,7 +18,9 @@ struct ContentView: View {
     @State private var rawStreamEnabled = true
     @State private var rawStreamHost = "192.168.1.100"
     @State private var rawStreamPort = "5000"
+    @State private var isDiscovering = false
     private let rawStreamServer = RawStreamServer()
+    private let discoveryClient = DiscoveryClient()
 
     // UDP 音频传输
     @State private var audioStreamEnabled = true
@@ -183,8 +185,7 @@ struct ContentView: View {
                         .keyboardType(.decimalPad)
                         .autocapitalization(.none)
                         .disableAutocorrection(true)
-                        .disabled(isSharing)
-                }
+                        .disabled(isSharing)                }
                 HStack(spacing: 12) {
                     Image(systemName: "dot.radiowaves.left.and.right")
                         .foregroundStyle(Color.secondaryText)
@@ -343,6 +344,26 @@ struct ContentView: View {
             await MainActor.run {
                 isSharing = false
                 statusMessage = "已停止"
+            }
+        }
+    }
+
+    /// 自动发现桌面端：UDP 广播 PHONECAM_DISCOVER 等待回包。
+    private func autoDiscover() {
+        isDiscovering = true
+        statusMessage = "正在搜索桌面端..."
+        discoveryClient.discover { [self] result in
+            DispatchQueue.main.async {
+                isDiscovering = false
+                switch result {
+                case .success(let endpoint):
+                    self.rawStreamHost = endpoint.host
+                    self.rawStreamPort = String(endpoint.tcpPort)
+                    self.audioStreamPort = String(endpoint.udpPort)
+                    self.statusMessage = "已发现桌面端: \(endpoint.host)"
+                case .failure(let err):
+                    self.statusMessage = "未发现桌面端: \(err.localizedDescription)"
+                }
             }
         }
     }

@@ -48,6 +48,12 @@
     <string>PhoneCam 需要使用摄像头将视频传输到电脑。</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>PhoneCam 需要使用麦克风将音频传输到电脑。</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>PhoneCam 需要在局域网内自动发现并连接电脑。</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_phonecam._tcp</string>
+    </array>
     <key>UIBackgroundModes</key>
     <array>
         <string>audio</string>

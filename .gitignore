@@ -52,3 +52,10 @@ DerivedData/
 
 # Temporary secret upload helper
 .secrets-upload.txt
+
+# Local monitor scripts with hardcoded GitHub tokens
+monitor.py
+monitor_loop.py
+run_*_logs/
+run_*_logs.zip
+Assets.car
