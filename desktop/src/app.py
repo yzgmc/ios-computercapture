@@ -7,76 +7,52 @@ from PyQt6.QtGui import QImage, QPixmap
 from qasync import asyncSlot
 
 from ui.main_window import MainWindow
-from webrtc.peer import WebRTCPeer
-from signaling import EmbeddedSignalingServer, SignalingClient
 from capture.virtual_device import (
-    VirtualCameraOutput, VirtualAudioOutput, find_default_virtual_audio_device
+    VirtualCameraOutput, find_default_virtual_audio_device
 )
-from discovery.service import DiscoveryService
 from raw_stream import RawStreamReceiver, PixelFormat
+from audio_stream import AudioStreamReceiver, AudioPlayer
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PORT = 8080
-DEFAULT_ROOM = "room1"
-RAW_STREAM_PORT = 5000
+RAW_STREAM_PORT = 5000   # TCP 视频原画质
+AUDIO_STREAM_PORT = 5001  # UDP 音频
 
 
 class PhoneCamApp(QObject):
     status_changed = pyqtSignal(str)
-    video_frame_received = pyqtSignal(object)
-    audio_frame_received = pyqtSignal(object)
     raw_frame_received = pyqtSignal(bytes, int, int, int, int)
 
     def __init__(self):
         super().__init__()
         self.window = MainWindow()
-        self.window.connect_requested.connect(self._on_connect_requested)
-        self.window.disconnect_requested.connect(self._on_disconnect_requested)
         self.window.virtual_camera_toggled.connect(self._on_virtual_camera_toggled)
         self.window.virtual_audio_toggled.connect(self._on_virtual_audio_toggled)
+        self.window.flip_changed.connect(self._on_flip_changed)
+        self.window.volume_changed.connect(self._on_volume_changed)
 
         self.status_changed.connect(self.window.set_status)
-        self.video_frame_received.connect(self.window.update_video_frame)
-
-        # 内嵌信令服务器，随桌面客户端启动
-        self.signaling_server = EmbeddedSignalingServer(host="0.0.0.0", port=DEFAULT_PORT)
-        # 信令客户端，连到自己内嵌的服务器
-        self.signaling = SignalingClient()
-        self.peer = WebRTCPeer()
-        self.discovery = DiscoveryService(port=DEFAULT_PORT)
 
         self.virtual_camera = VirtualCameraOutput()
-        self.virtual_audio = VirtualAudioOutput(
-            device_index=find_default_virtual_audio_device()
+
+        # UDP 音频播放器：默认输出到虚拟音频设备（VB-Cable），
+        # 用户在 UI 中切换"启动虚拟麦克风"时 start/stop。
+        self.audio_player = AudioPlayer(
+            output_device_index=find_default_virtual_audio_device()
         )
 
-        # 原画质 TCP 接收器（随桌面端启动，监听 5000 端口等待 iOS 推流）
+        # 原画质 TCP 视频接收器（监听 0.0.0.0:5000，等待 iOS 推流）
         self.raw_receiver = RawStreamReceiver(
             host="0.0.0.0", port=RAW_STREAM_PORT, on_frame=self._on_raw_frame
         )
 
-        self._pending_messages: list[dict] | None = []
-        self._auto_started = False
+        # UDP 音频接收器（监听 0.0.0.0:5001）
+        self.audio_receiver = AudioStreamReceiver(
+            host="0.0.0.0", port=AUDIO_STREAM_PORT,
+            on_packet=self._on_audio_packet,
+        )
 
-        self._setup_peer_signals()
         self.raw_frame_received.connect(self._display_raw_frame)
-
-    def _setup_peer_signals(self):
-        self.peer.on_video_frame = self._on_video_frame
-        self.peer.on_audio_frame = self._on_audio_frame
-        self.peer.on_connection_state_change = self._on_connection_state_change
-        # 控制方向已反转：iOS 端推送采集参数，桌面端只读接收
-        self.peer.on_remote_settings = self._on_remote_settings
-
-    def _on_video_frame(self, frame):
-        self.video_frame_received.emit(frame)
-        self.virtual_camera.send_frame(frame)
-        logger.debug("Video frame forwarded: %dx%d", frame.width, frame.height)
-
-    def _on_audio_frame(self, frame):
-        self.audio_frame_received.emit(frame)
-        self.virtual_audio.send_frame(frame)
 
     def _on_raw_frame(self, raw: bytes, width: int, height: int,
                       pixel_format: int, bytes_per_row: int):
@@ -101,6 +77,13 @@ class PhoneCamApp(QObject):
                 logger.info("Raw stream first frame: %dx%d bpr=%d payload=%d",
                             width, height, bytes_per_row, len(raw))
                 self._raw_first_frame_logged = True
+                # 首帧到达时同步 UI 上的分辨率显示
+                self.window.set_actual_resolution(width, height)
+                # 把实际分辨率同步到虚拟摄像头（仅在未启用时生效；
+                # 已启用时维持原格式，由 worker 缩放）
+                if not self.virtual_camera.enabled:
+                    self.virtual_camera.width = width
+                    self.virtual_camera.height = height
             arr = np.frombuffer(raw[:expected], dtype=np.uint8)
             stride_bytes = max(bytes_per_row, width * 4)
             arr = arr.reshape(height, stride_bytes)[:, :width * 4].reshape(height, width, 4)
@@ -115,6 +98,9 @@ class PhoneCamApp(QObject):
             elif self.window.flip_vertical_checkbox.isChecked():
                 rgb = cv2.flip(rgb, 0)
             rgb = np.ascontiguousarray(rgb)
+            # 同步到虚拟摄像头
+            if self.virtual_camera.enabled:
+                self.virtual_camera.send_ndarray(rgb)
             h, w, _ = rgb.shape
             qt_image = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
             pixmap = QPixmap.fromImage(qt_image)
@@ -126,6 +112,14 @@ class PhoneCamApp(QObject):
             self.window.video_label.setPixmap(scaled)
         except Exception as e:
             logger.error("Display raw frame error: %s", e)
+
+    def _on_audio_packet(self, pcm: bytes, sample_rate: int, channels: int,
+                         audio_format: int, seq: int):
+        """UDP 音频包到达，转交 AudioPlayer 播放。在 asyncio 线程中调用。
+
+        AudioPlayer.feed 是线程安全的（内部有锁），可直接调用。
+        """
+        self.audio_player.feed(pcm, sample_rate, channels, audio_format)
 
     def _get_local_ip(self) -> str:
         try:
@@ -143,93 +137,28 @@ class PhoneCamApp(QObject):
             return "127.0.0.1"
 
     async def start(self):
-        """应用启动时自动拉起信令服务器、mDNS 发现并进入等待连接状态。"""
-        # 1. 启动内嵌信令服务器
-        try:
-            await self.signaling_server.start()
-        except Exception as e:
-            logger.error("Failed to start embedded signaling server: %s", e)
-            self.status_changed.emit(f"信令服务器启动失败: {e}")
-            return
-
+        """应用启动：监听 TCP 5000 视频 + UDP 5001 音频，等待 iOS 连接。"""
         local_ip = self._get_local_ip()
-        ws_url = f"ws://{local_ip}:{DEFAULT_PORT}"
-        self.window.set_server_address(ws_url)
-        self.status_changed.emit(f"信令服务器已启动: {ws_url}")
-        logger.info("Local signaling URL: %s", ws_url)
+        self.window.set_server_address(f"TCP :{RAW_STREAM_PORT} / UDP :{AUDIO_STREAM_PORT}")
 
-        # 2. 启动 mDNS 发现
-        try:
-            self.discovery.start()
-        except Exception as e:
-            logger.warning("Failed to start discovery service: %s", e)
-
-        # 3. 启动原画质 TCP 接收器（等待 iOS 端推流）
+        # 1. 启动原画质 TCP 接收器
         try:
             await self.raw_receiver.start()
-            self.status_changed.emit(f"原画质接收器已监听 :{RAW_STREAM_PORT}")
+            self.status_changed.emit(f"视频监听 :{RAW_STREAM_PORT} (TCP) · 等待 iPhone 连接 {local_ip}")
         except Exception as e:
-            logger.warning("Failed to start raw stream receiver: %s", e)
+            logger.error("Failed to start raw stream receiver: %s", e)
+            self.status_changed.emit(f"视频端口 {RAW_STREAM_PORT} 启动失败: {e}")
 
-        # 4. 自动建立 PeerConnection 并连入本地信令房间，等待 iOS offer
-        await self._auto_connect_local(ws_url, DEFAULT_ROOM)
-
-    async def _auto_connect_local(self, ws_url: str, room_id: str):
-        """自动连接本地信令服务器并就绪 PeerConnection。"""
+        # 2. 启动 UDP 音频接收器
         try:
-            await self.peer.start(self.signaling.send)
-            self.signaling.on_message = self._on_signaling_message
-            await self.signaling.connect(ws_url, room_id)
-            self._auto_started = True
-            self.window.set_connect_state(connected=False, auto_mode=True)
-            self.status_changed.emit("等待 iPhone 连接...")
-            await self._flush_pending_messages()
+            await self.audio_receiver.start()
+            self.status_changed.emit(f"音频监听 :{AUDIO_STREAM_PORT} (UDP)")
         except Exception as e:
-            logger.error("Auto connect failed: %s", e)
-            self.status_changed.emit(f"自动连接失败: {e}")
+            logger.error("Failed to start audio stream receiver: %s", e)
+            self.status_changed.emit(f"音频端口 {AUDIO_STREAM_PORT} 启动失败: {e}")
 
     def show(self):
         self.window.show()
-
-    @asyncSlot(str, str)
-    async def _on_connect_requested(self, signaling_url: str, room_id: str):
-        """手动连接（可指向远程信令服务器或重连本地）。"""
-        logger.info("Connecting to %s / room %s", signaling_url, room_id)
-        self.status_changed.emit("正在连接信令服务器...")
-        self._pending_messages = []
-        try:
-            await self.peer.start(self.signaling.send)
-            self.signaling.on_message = self._on_signaling_message
-            await self.signaling.connect(signaling_url, room_id)
-            self.status_changed.emit("正在建立 WebRTC 连接...")
-            await self._flush_pending_messages()
-        except Exception as e:
-            logger.error("Connection failed: %s", e)
-            self.status_changed.emit(f"连接失败: {e}")
-            if self._pending_messages is not None:
-                self._pending_messages.clear()
-
-    @asyncSlot()
-    async def _on_disconnect_requested(self):
-        logger.info("Disconnecting")
-        await self.peer.stop()
-        await self.signaling.disconnect()
-        self.status_changed.emit("已断开连接")
-        self.window.set_connect_state(connected=False, auto_mode=self._auto_started)
-
-    @asyncSlot(dict)
-    async def _on_remote_settings(self, settings: dict):
-        """接收 iPhone 端推送的采集参数，更新虚拟设备格式与只读 UI 显示。"""
-        logger.info("Remote settings from iOS: %s", settings)
-        width = settings.get("width", 1280)
-        height = settings.get("height", 720)
-        fps = settings.get("fps", 30)
-        self.virtual_camera.update_format(width, height, fps)
-        self.virtual_camera.update_flip(
-            settings.get("flip_horizontal", False),
-            settings.get("flip_vertical", False),
-        )
-        self.window.apply_remote_settings(settings)
 
     @asyncSlot(bool)
     async def _on_virtual_camera_toggled(self, enabled: bool):
@@ -243,59 +172,35 @@ class PhoneCamApp(QObject):
     @asyncSlot(bool)
     async def _on_virtual_audio_toggled(self, enabled: bool):
         if enabled:
-            self.virtual_audio.enable()
+            self.audio_player.start()
             self.status_changed.emit("虚拟麦克风已启动")
         else:
-            self.virtual_audio.disable()
+            self.audio_player.stop()
             self.status_changed.emit("虚拟麦克风已停止")
 
-    def _on_signaling_message(self, message: dict):
-        if self._pending_messages is not None:
-            self._pending_messages.append(message)
-        else:
-            asyncio.create_task(self.peer.handle_signaling_message(message))
+    @asyncSlot(bool, bool)
+    async def _on_flip_changed(self, flip_h: bool, flip_v: bool):
+        self.virtual_camera.update_flip(flip_h, flip_v)
 
-    async def _flush_pending_messages(self):
-        pending = self._pending_messages
-        self._pending_messages = None
-        if pending:
-            for message in pending:
-                await self.peer.handle_signaling_message(message)
-
-    def _on_connection_state_change(self, state: str):
-        if state == "connected":
-            self.status_changed.emit("已连接，正在接收视频")
-            self.window.set_connect_state(connected=True, auto_mode=self._auto_started)
-        elif state in ("disconnected", "failed", "closed"):
-            self.status_changed.emit(f"连接{state}")
-            self.window.set_connect_state(connected=False, auto_mode=self._auto_started)
-        else:
-            self.status_changed.emit(f"连接状态: {state}")
+    @asyncSlot(float)
+    async def _on_volume_changed(self, volume: float):
+        self.audio_player.set_volume(volume)
 
     async def shutdown(self):
         """应用退出时清理所有资源。"""
-        try:
-            await self.peer.stop()
-        except Exception as e:
-            logger.warning("Peer stop error: %s", e)
-        try:
-            await self.signaling.disconnect()
-        except Exception as e:
-            logger.warning("Signaling disconnect error: %s", e)
-        try:
-            await self.signaling_server.stop()
-        except Exception as e:
-            logger.warning("Signaling server stop error: %s", e)
-        try:
-            self.discovery.stop()
-        except Exception as e:
-            logger.warning("Discovery stop error: %s", e)
         try:
             await self.raw_receiver.stop()
         except Exception as e:
             logger.warning("Raw receiver stop error: %s", e)
         try:
-            self.virtual_camera.disable()
-            self.virtual_audio.disable()
+            await self.audio_receiver.stop()
         except Exception as e:
-            logger.warning("Virtual device disable error: %s", e)
+            logger.warning("Audio receiver stop error: %s", e)
+        try:
+            self.audio_player.stop()
+        except Exception as e:
+            logger.warning("Audio player stop error: %s", e)
+        try:
+            self.virtual_camera.disable()
+        except Exception as e:
+            logger.warning("Virtual camera disable error: %s", e)

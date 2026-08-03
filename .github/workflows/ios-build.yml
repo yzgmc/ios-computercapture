@@ -39,23 +39,17 @@ jobs:
           ls -la
           ls -la PhoneCam.xcodeproj/xcshareddata/xcschemes/ || true
 
-      - name: Install CocoaPods dependencies
+      - name: Inspect project schemes
         working-directory: ios
         run: |
-          gem install cocoapods
-          pod install --repo-update
-
-      - name: Inspect workspace schemes
-        working-directory: ios
-        run: |
-          xcodebuild -workspace PhoneCam.xcworkspace -list
+          xcodebuild -project PhoneCam.xcodeproj -list
 
       - name: Build iOS app
         working-directory: ios
         run: |
           set -o pipefail
           xcodebuild clean build \
-            -workspace PhoneCam.xcworkspace \
+            -project PhoneCam.xcodeproj \
             -scheme PhoneCam \
             -sdk iphonesimulator \
             -destination 'platform=iOS Simulator,name=iPhone 16' \

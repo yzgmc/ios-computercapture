@@ -5,7 +5,7 @@
 iOS 在未越狱状态下，**无法在 USB 上启动自定义服务**。第三方 App 没有权限直接
 通过 USB 通道与桌面端通信。因此本项目 USB 连接采用 **tethering 网络方案**：
 利用 iPhone 的「个人热点」USB 共享功能，让 iPhone 与电脑之间建立一条 172.20.10.x
-网段的点对点 IP 链路，所有信令与媒体流仍走标准 TCP/UDP 协议。
+网段的点对点 IP 链路，所有媒体流仍走标准 TCP/UDP 协议。
 
 > 实现位置：
 > - 桌面端检测：`desktop/src/usb/`（`device_detector.py`、`tethering_discovery.py`）
@@ -15,7 +15,7 @@ iOS 在未越狱状态下，**无法在 USB 上启动自定义服务**。第三�
 
 ```
 [iPhone App]
-   │  监听 0.0.0.0:8080（信令）+ UDP :5000（原画质）
+   │  主动连接 桌面IP:5000 (TCP 视频) + 桌面IP:5001 (UDP 音频)
    │
    │  USB 线缆 + 个人热点 (USB 模式)
    ▼
@@ -24,9 +24,9 @@ iOS 在未越狱状态下，**无法在 USB 上启动自定义服务**。第三�
    │  电脑由 DHCP 获得 172.20.10.x
    ▼
 [桌面端]
+   │  监听 0.0.0.0:5000 (TCP 视频) + 0.0.0.0:5001 (UDP 音频)
    │  device_detector: 确认 Apple USB 设备已接入
-   │  tethering_discovery: 扫描 172.20.10.0/24 找到 iPhone:8080
-   │  信令/WebRTC/Raw Stream 走该 IP，与 Wi-Fi 模式同协议
+   │  tethering_discovery: 扫描 172.20.10.0/24 找到桌面端
 ```
 
 ## 使用流程
@@ -42,16 +42,13 @@ iOS 在未越狱状态下，**无法在 USB 上启动自定义服务**。第三�
 
 ### 3. 桌面端启动
 
-桌面端启动后：
-
-- `UsbDeviceDetector` 枚举 VID=0x05AC 的 Apple USB 设备，确认物理连接
-- `TetheringDiscovery` 优先探测 172.20.10.1:8080，未命中则并发扫描整个网段
-- 找到信令端点后，`ws://172.20.10.1:8080` 即可作为信令地址使用
+桌面端启动后自动监听 `0.0.0.0:5000`（TCP 视频）和 `0.0.0.0:5001`（UDP 音频）。
+状态栏会显示本机在 tethering 网段的地址（如 `172.20.10.2`）。
 
 ### 4. iOS 端配置
 
-在 iOS App 的「原画质传输」卡片中，将桌面端 IP 填为电脑在 tethering 网段的地址
-（如 172.20.10.2），即可走 USB tethering 链路传输原画质帧。
+在 iOS App 中将桌面端 IP 填为电脑在 tethering 网段的地址（如 `172.20.10.2`），
+TCP 端口 `5000`、UDP 端口 `5001`，点击「开始共享」即可走 USB tethering 链路。
 
 ## 模块说明
 
@@ -92,13 +89,13 @@ async def find():
 
 | 方案 | 可行性 | 说明 |
 |------|--------|------|
-| **USB tethering（本项目）** | ✅ 无需越狱 | 走标准 IP 协议，复用现有信令/媒体栈 |
+| **USB tethering（本项目）** | ✅ 无需越狱 | 走标准 IP 协议，复用现有媒体栈 |
 | usbmuxd / libimobiledevice | ⚠️ 需配合 | 可做端口转发（iproxy），但 iOS App 仍需监听端口 |
 | pymobiledevice3 | ⚠️ 需配合 | 纯 Python usbmuxd 客户端，本质同上 |
 | Network Extension | ❌ 需特权 | 苹果特殊权限，普通开发者无法申请 |
 | 自定义 USB 服务 | ❌ 需越狱 | 未越狱 iOS 不允许 |
 
-> usbmuxd 端口转发（`iproxy 8080 8080`）可在未开启个人热点时使用，但需要额外
+> usbmuxd 端口转发（`iproxy 5000 5000`）可在未开启个人热点时使用，但需要额外
 > 安装 libimobiledevice 工具链。本项目优先采用零依赖的 tethering 方案。
 
 ## 依赖
@@ -112,5 +109,4 @@ async def find():
 
 - tethering 网段地址可能随热点重启变化，发现结果不应长期缓存
 - 部分运营商合约机可能禁用个人热点的 USB 共享
-- 原画质 UDP 传输码率高（720p≈265Mbps），USB tethering 链路带宽充足可承载
-- 控制信令仍走 WebRTC data channel / 信令服务器，不依赖 USB 物理连接
+- 原画质 TCP 传输码率高（720p≈265Mbps），USB tethering 链路带宽充足可承载

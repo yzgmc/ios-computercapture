@@ -24,12 +24,9 @@ def main():
         "--one-dir",
         "--clean",
         "--noconfirm",
-        "--hidden-import", "aiortc",
-        "--hidden-import", "aiohttp",
         "--hidden-import", "cv2",
         "--hidden-import", "pyvirtualcam",
         "--hidden-import", "pyaudio",
-        "--hidden-import", "zeroconf",
         "--collect-all", "PyQt6",
     ]
 

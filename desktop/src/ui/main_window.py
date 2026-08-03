@@ -1,9 +1,6 @@
-import asyncio
 import logging
 
-import numpy as np
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QComboBox,
@@ -14,10 +11,16 @@ logger = logging.getLogger(__name__)
 
 
 class MainWindow(QMainWindow):
-    connect_requested = pyqtSignal(str, str)
-    disconnect_requested = pyqtSignal()
+    """桌面端主窗口。
+
+    桌面端是被动接收方：监听 TCP 5000（视频） + UDP 5001（音频）等待 iPhone 连接。
+    用户可控制：水平/垂直翻转、音量、启动/停止虚拟摄像头与虚拟麦克风。
+    """
+
     virtual_camera_toggled = pyqtSignal(bool)
     virtual_audio_toggled = pyqtSignal(bool)
+    flip_changed = pyqtSignal(bool, bool)
+    volume_changed = pyqtSignal(float)
 
     def __init__(self):
         super().__init__()
@@ -30,42 +33,34 @@ class MainWindow(QMainWindow):
     def _setup_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
-        main_layout = QHBoxLayout(central)
+        main_layout = QVBoxLayout(central)
+
+        # 顶部：监听端口信息
+        info_group = QGroupBox("监听端口")
+        info_layout = QHBoxLayout(info_group)
+        info_layout.addWidget(QLabel("桌面监听地址："))
+        self.server_input = QLineEdit("TCP :5000 / UDP :5001")
+        self.server_input.setReadOnly(True)
+        info_layout.addWidget(self.server_input, stretch=1)
+        main_layout.addWidget(info_group)
+
+        # 中部：视频预览 + 右侧控制
+        content_widget = QWidget()
+        content_layout = QHBoxLayout(content_widget)
 
         # 左侧：视频预览
-        self.video_label = QLabel("等待连接...")
+        self.video_label = QLabel("等待 iPhone 连接...")
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_label.setStyleSheet("background-color: #1a1a1a; color: #ffffff;")
         self.video_label.setMinimumSize(640, 480)
-        main_layout.addWidget(self.video_label, stretch=3)
+        content_layout.addWidget(self.video_label, stretch=3)
 
         # 右侧：控制面板
         control_panel = QWidget()
         control_layout = QVBoxLayout(control_panel)
 
-        # 连接设置
-        connection_group = QGroupBox("连接设置")
-        connection_layout = QVBoxLayout(connection_group)
-
-        connection_layout.addWidget(QLabel("信令服务器地址（iPhone 连入此地址）"))
-        self.server_input = QLineEdit("ws://0.0.0.0:8080")
-        self.server_input.setReadOnly(True)
-        connection_layout.addWidget(self.server_input)
-
-        connection_layout.addWidget(QLabel("房间 ID"))
-        self.room_input = QLineEdit("room1")
-        connection_layout.addWidget(self.room_input)
-
-        self.connect_button = QPushButton("重新连接")
-        self.disconnect_button = QPushButton("断开")
-        self.disconnect_button.setEnabled(False)
-        connection_layout.addWidget(self.connect_button)
-        connection_layout.addWidget(self.disconnect_button)
-
-        control_layout.addWidget(connection_group)
-
-        # 视频参数（由 iPhone 端控制，桌面端只读显示）
-        video_group = QGroupBox("视频参数（由 iPhone 控制 · 只读）")
+        # 视频参数（分辨率由实际视频流自动同步，只读显示）
+        video_group = QGroupBox("视频参数")
         video_layout = QVBoxLayout(video_group)
 
         video_layout.addWidget(QLabel("分辨率"))
@@ -74,34 +69,23 @@ class MainWindow(QMainWindow):
         self.resolution_combo.setEnabled(False)
         video_layout.addWidget(self.resolution_combo)
 
-        video_layout.addWidget(QLabel("帧率"))
-        self.fps_slider = QSlider(Qt.Orientation.Horizontal)
-        self.fps_slider.setRange(15, 60)
-        self.fps_slider.setValue(30)
-        self.fps_slider.setEnabled(False)
-        self.fps_label = QLabel("30 fps")
-        video_layout.addWidget(self.fps_slider)
-        video_layout.addWidget(self.fps_label)
-
+        # 翻转（用户可编辑，本地控制）
         self.flip_horizontal_checkbox = QCheckBox("水平翻转")
         self.flip_vertical_checkbox = QCheckBox("垂直翻转")
-        self.flip_horizontal_checkbox.setEnabled(False)
-        self.flip_vertical_checkbox.setEnabled(False)
         video_layout.addWidget(self.flip_horizontal_checkbox)
         video_layout.addWidget(self.flip_vertical_checkbox)
 
         control_layout.addWidget(video_group)
 
-        # 音频参数（由 iPhone 端控制，桌面端只读显示）
-        audio_group = QGroupBox("音频参数（由 iPhone 控制 · 只读）")
+        # 音频参数（用户可编辑音量）
+        audio_group = QGroupBox("音频参数")
         audio_layout = QVBoxLayout(audio_group)
 
         audio_layout.addWidget(QLabel("音量"))
         self.volume_slider = QSlider(Qt.Orientation.Horizontal)
         self.volume_slider.setRange(0, 100)
-        self.volume_slider.setValue(80)
-        self.volume_slider.setEnabled(False)
-        self.volume_label = QLabel("80%")
+        self.volume_slider.setValue(100)
+        self.volume_label = QLabel("100%")
         audio_layout.addWidget(self.volume_slider)
         audio_layout.addWidget(self.volume_label)
 
@@ -122,7 +106,8 @@ class MainWindow(QMainWindow):
         control_layout.addWidget(device_group)
 
         control_layout.addStretch()
-        main_layout.addWidget(control_panel, stretch=1)
+        content_layout.addWidget(control_panel, stretch=1)
+        main_layout.addWidget(content_layout, stretch=1)
 
         # 状态栏
         self.status_bar = QStatusBar()
@@ -130,117 +115,37 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("就绪")
 
     def _setup_signals(self):
-        self.connect_button.clicked.connect(self._on_connect)
-        self.disconnect_button.clicked.connect(self._on_disconnect)
-
         self.virtual_camera_button.toggled.connect(self.virtual_camera_toggled.emit)
         self.virtual_audio_button.toggled.connect(self.virtual_audio_toggled.emit)
 
-    def _on_connect(self):
-        url = self.server_input.text().strip()
-        room = self.room_input.text().strip()
-        if url and room:
-            self.connect_requested.emit(url, room)
-            self.connect_button.setEnabled(False)
-            self.disconnect_button.setEnabled(True)
+        self.flip_horizontal_checkbox.toggled.connect(self._emit_flip_changed)
+        self.flip_vertical_checkbox.toggled.connect(self._emit_flip_changed)
+        self.volume_slider.valueChanged.connect(self._on_volume_slider_changed)
 
-    def _on_disconnect(self):
-        self.disconnect_requested.emit()
-        self.connect_button.setEnabled(True)
-        self.disconnect_button.setEnabled(False)
+    def _emit_flip_changed(self, _checked: bool = False):
+        self.flip_changed.emit(
+            self.flip_horizontal_checkbox.isChecked(),
+            self.flip_vertical_checkbox.isChecked(),
+        )
 
-    def apply_remote_settings(self, settings: dict):
-        """应用 iPhone 端推送的采集参数到只读控件（不触发信号）。"""
-        width = settings.get("width")
-        height = settings.get("height")
-        fps = settings.get("fps")
-        volume = settings.get("volume")
-        flip_h = settings.get("flip_horizontal")
-        flip_v = settings.get("flip_vertical")
-
-        # 临时阻塞信号，避免程序化设值触发 settings_changed
-        for w in (self.resolution_combo, self.fps_slider, self.volume_slider,
-                  self.flip_horizontal_checkbox, self.flip_vertical_checkbox):
-            w.blockSignals(True)
-
-        try:
-            if width and height:
-                text = f"{int(width)}x{int(height)}"
-                idx = self.resolution_combo.findText(text)
-                if idx >= 0:
-                    self.resolution_combo.setCurrentIndex(idx)
-            if fps is not None:
-                self.fps_slider.setValue(int(fps))
-                self.fps_label.setText(f"{int(fps)} fps")
-            if volume is not None:
-                self.volume_slider.setValue(int(float(volume) * 100))
-                self.volume_label.setText(f"{int(float(volume) * 100)}%")
-            if flip_h is not None:
-                self.flip_horizontal_checkbox.setChecked(bool(flip_h))
-            if flip_v is not None:
-                self.flip_vertical_checkbox.setChecked(bool(flip_v))
-        finally:
-            for w in (self.resolution_combo, self.fps_slider, self.volume_slider,
-                      self.flip_horizontal_checkbox, self.flip_vertical_checkbox):
-                w.blockSignals(False)
-
-    def update_video_frame(self, frame):
-        """frame 为 aiortc 的 VideoFrame"""
-        try:
-            import cv2
-            logger.debug("Updating UI with frame %dx%d", frame.width, frame.height)
-            img = frame.to_ndarray(format="rgb24")
-
-            # 先按预览控件大小缩放，降低 2K/4K 帧的内存与 CPU 占用
-            label_w = max(self.video_label.width(), 320)
-            label_h = max(self.video_label.height(), 240)
-            if img.shape[1] > label_w or img.shape[0] > label_h:
-                scale = min(label_w / img.shape[1], label_h / img.shape[0])
-                new_w = max(int(img.shape[1] * scale), 1)
-                new_h = max(int(img.shape[0] * scale), 1)
-                img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-
-            flip_code = -1
-            if self.flip_horizontal_checkbox.isChecked() and not self.flip_vertical_checkbox.isChecked():
-                flip_code = 1
-            elif self.flip_vertical_checkbox.isChecked() and not self.flip_horizontal_checkbox.isChecked():
-                flip_code = 0
-            elif self.flip_horizontal_checkbox.isChecked() and self.flip_vertical_checkbox.isChecked():
-                flip_code = -1
-            else:
-                flip_code = None
-            if flip_code is not None:
-                img = cv2.flip(img, flip_code)
-
-            img = np.ascontiguousarray(img)
-            h, w, ch = img.shape
-            bytes_per_line = ch * w
-            qt_image = QImage(img.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
-            pixmap = QPixmap.fromImage(qt_image)
-            scaled = pixmap.scaled(
-                self.video_label.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            )
-            self.video_label.setPixmap(scaled)
-        except Exception as e:
-            logger.error("Update video frame error: %s", e)
+    def _on_volume_slider_changed(self, value: int):
+        self.volume_label.setText(f"{value}%")
+        self.volume_changed.emit(value / 100.0)
 
     def set_status(self, message: str):
         self.status_bar.showMessage(message)
 
     def set_server_address(self, address: str):
-        """显示当前内嵌信令服务器对外地址，供 iPhone 输入连接。"""
+        """显示当前桌面端监听的端口信息。"""
         self.server_input.setText(address)
 
-    def set_connect_state(self, connected: bool, auto_mode: bool = False):
-        """根据连接状态更新按钮可用性。
-
-        auto_mode=True 表示由内嵌服务器自动连接，此时连接按钮文案为"重新连接"。
-        """
-        if connected:
-            self.connect_button.setEnabled(False)
-            self.disconnect_button.setEnabled(True)
+    def set_actual_resolution(self, width: int, height: int):
+        """根据实际收到的视频帧尺寸更新分辨率下拉框（只读）。"""
+        text = f"{int(width)}x{int(height)}"
+        idx = self.resolution_combo.findText(text)
+        if idx >= 0:
+            self.resolution_combo.setCurrentIndex(idx)
         else:
-            self.connect_button.setEnabled(True)
-            self.disconnect_button.setEnabled(False)
+            # 不在预设列表里，临时插入
+            self.resolution_combo.insertItem(0, text)
+            self.resolution_combo.setCurrentIndex(0)

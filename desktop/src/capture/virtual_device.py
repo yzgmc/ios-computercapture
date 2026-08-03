@@ -61,11 +61,10 @@ class VirtualCameraOutput:
         import cv2
         while self.enabled:
             try:
-                frame = self._queue.get(timeout=0.05)
+                img = self._queue.get(timeout=0.05)
             except queue.Empty:
                 continue
             try:
-                img = frame.to_ndarray(format="rgb24")
                 with self._lock:
                     flip_h = self.flip_horizontal
                     flip_v = self.flip_vertical
@@ -84,16 +83,17 @@ class VirtualCameraOutput:
             except Exception as e:
                 logger.error("Virtual camera worker error: %s", e)
 
-    def send_frame(self, frame):
+    def send_ndarray(self, img: np.ndarray):
+        """将 RGB ndarray 帧送入虚拟摄像头队列。调用方负责格式转换。"""
         if not self.enabled:
             return
         try:
-            self._queue.put_nowait(frame)
+            self._queue.put_nowait(img)
         except queue.Full:
             # 丢弃最旧帧，保持实时性
             try:
                 self._queue.get_nowait()
-                self._queue.put_nowait(frame)
+                self._queue.put_nowait(img)
             except queue.Empty:
                 pass
 
@@ -110,102 +110,6 @@ class VirtualCameraOutput:
         with self._lock:
             self.flip_horizontal = horizontal
             self.flip_vertical = vertical
-
-
-class VirtualAudioOutput:
-    """将接收到的音频帧通过 PyAudio 输出到虚拟音频设备。
-
-    用户需预先安装：
-    - Windows: VB-Cable (https://vb-audio.com/Cable/)
-    - macOS: BlackHole (https://existential.audio/blackhole/)
-    """
-
-    def __init__(self, device_index: Optional[int] = None,
-                 sample_rate: int = 48000, channels: int = 2):
-        self.device_index = device_index
-        self.sample_rate = sample_rate
-        self.channels = channels
-        self.enabled = False
-        self._stream = None
-        self._pa = None
-        self._frame_queue = queue.Queue(maxsize=10)
-        self._thread: Optional[threading.Thread] = None
-        self._running = False
-
-    def enable(self):
-        try:
-            import pyaudio
-            self._pa = pyaudio.PyAudio()
-            self._running = True
-            self._stream = self._pa.open(
-                format=pyaudio.paInt16,
-                channels=self.channels,
-                rate=self.sample_rate,
-                output=True,
-                output_device_index=self.device_index,
-                frames_per_buffer=960,
-                stream_callback=self._audio_callback,
-            )
-            self.enabled = True
-            logger.info("Virtual audio output enabled on device %s", self.device_index)
-        except Exception as e:
-            logger.error("Failed to enable virtual audio: %s", e)
-            self.enabled = False
-
-    def disable(self):
-        self.enabled = False
-        self._running = False
-        if self._stream:
-            self._stream.stop_stream()
-            self._stream.close()
-            self._stream = None
-        if self._pa:
-            self._pa.terminate()
-            self._pa = None
-        # 清空队列
-        while not self._frame_queue.empty():
-            try:
-                self._frame_queue.get_nowait()
-            except queue.Empty:
-                break
-
-    def _audio_callback(self, in_data, frame_count, time_info, status):
-        try:
-            data = self._frame_queue.get_nowait()
-            return (data, pyaudio.paContinue)
-        except queue.Empty:
-            return (b'\x00' * frame_count * self.channels * 2, pyaudio.paContinue)
-
-    def send_frame(self, frame):
-        if not self.enabled:
-            return
-        try:
-            # aiortc AudioFrame 转换为 16bit PCM
-            # to_ndarray 返回 shape (channels, samples) 的 float32 planar 数据
-            audio_array = frame.to_ndarray()
-
-            # 调整音量
-            audio_array = np.clip(audio_array * 32767, -32768, 32767).astype(np.int16)
-
-            # 单/双声道适配
-            if audio_array.shape[0] == 1 and self.channels == 2:
-                audio_array = np.repeat(audio_array, 2, axis=0)
-            elif audio_array.shape[0] == 2 and self.channels == 1:
-                audio_array = audio_array.mean(axis=0, keepdims=True).astype(np.int16)
-            elif audio_array.shape[0] != self.channels:
-                # 其他情况，取前 N 个声道或复制第一个声道
-                if audio_array.shape[0] > self.channels:
-                    audio_array = audio_array[:self.channels]
-                else:
-                    audio_array = np.repeat(audio_array[self.channels - 1:self.channels],
-                                            self.channels - audio_array.shape[0] + 1, axis=0)
-
-            # planar (channels, samples) -> interleaved (samples, channels)
-            audio_array = audio_array.T
-            pcm_data = audio_array.tobytes()
-            self._frame_queue.put_nowait(pcm_data)
-        except Exception as e:
-            logger.error("Virtual audio send frame error: %s", e)
 
 
 def list_audio_devices():

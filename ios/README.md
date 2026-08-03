@@ -5,25 +5,21 @@
 - Xcode 15+
 - iOS 15+
 - Swift 5.9+
-- WebRTC 框架（建议通过 CocoaPods 或 Swift Package Manager 引入）
+- 无第三方依赖（仅使用 AVFoundation + Network.framework）
 
 ## 创建 Xcode 项目
 
-1. 打开 Xcode，选择 **Create New Project**
-2. 选择 **iOS → App**，名称填写 **PhoneCam**
-3. 将本目录下的 `PhoneCam/*.swift` 和 `Info.plist` 复制到项目中
-4. 添加 WebRTC 依赖：
-   - 通过 CocoaPods：
-     ```ruby
-     pod 'GoogleWebRTC'
-     ```
-   - 或通过 Swift Package Manager 添加 `webrtc-sdk-ios`
-5. 在 **Signing & Capabilities** 中选择你的 Team
-6. 编译并运行到 iPhone 设备
+1. 在 `ios/` 目录下运行 `xcodegen generate` 生成 `PhoneCam.xcodeproj`
+2. 在 **Signing & Capabilities** 中选择你的 Team
+3. 编译并运行到 iPhone 设备
+
+> Info.plist 已声明 `NSCameraUsageDescription` 与 `NSMicrophoneUsageDescription`，
+> 无需额外配置权限。
 
 ## 使用说明
 
 1. 确保 iPhone 和电脑在同一 Wi-Fi 网络
-2. 启动电脑端信令服务器
-3. 在 iPhone 应用中输入电脑 IP 和房间 ID
-4. 点击「开始共享」
+2. 启动电脑端应用（自动监听 TCP 5000 + UDP 5001）
+3. 在 iPhone 应用中输入电脑 IP、TCP 端口（默认 5000）、UDP 端口（默认 5001）
+4. 选择分辨率与帧率
+5. 点击「开始共享」

@@ -87,15 +87,15 @@
 4. `readexactly(payload_length)` 读 payload → 调用 `on_frame`
 5. `on_frame` 通过 Qt 信号转发到主线程 → `_display_raw_frame` 用 OpenCV/Qt 渲染
 
-## 与 WebRTC 的关系
+## 与 UDP 音频通道的关系
 
-| 通道    | 用途                       | 协议 |
-|---------|----------------------------|------|
-| WebRTC  | 视频预览、音频、控制信令   | SRTP over DTLS |
-| Raw Stream | 原画质视频（无音频/控制） | TCP（本协议） |
+| 通道       | 用途                | 协议             | 帧头 |
+|------------|---------------------|------------------|------|
+| Raw Stream | 原画质视频（BGRA）  | TCP（本协议）    | 28B  |
+| Audio Stream | 麦克风音频（PCM16） | UDP（独立协议） | 16B  |
 
-两者并存：WebRTC 提供低带宽兼容性，Raw Stream 提供无损画质。当桌面端 IP 可达
-且 iOS 端开关打开时，Raw Stream 作为附加视频源，覆盖 WebRTC 预览画面。
+视频走 TCP 保证每帧完整可靠，音频走 UDP 容许丢包以保实时性。两条通道独立，
+分别监听 5000 / 5001 端口，iOS 端在 `ContentView` 中分别开关。
 
 ## 限制与未来工作
 

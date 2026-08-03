@@ -46,10 +46,6 @@ DerivedData/
 # PyInstaller
 *.spec
 
-# Self-signed HTTPS certificates
-signaling/cert.pem
-signaling/key.pem
-
 # iOS signing assets (certificates & provisioning profiles)
 *.p12
 *.mobileprovision

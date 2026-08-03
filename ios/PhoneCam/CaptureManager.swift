@@ -1,6 +1,5 @@
 import AVFoundation
 import UIKit
-import WebRTC
 
 enum CaptureResolution: CaseIterable, Identifiable {
     case p4K, p2K, p1080, p720, p480, p240
@@ -37,7 +36,7 @@ class CaptureManager: NSObject, ObservableObject {
     @Published var fps: Int = 30 {
         didSet { Task { await applyFps() } }
     }
-    @Published var volume: Double = 0.8
+    @Published var volume: Double = 1.0
     @Published var flipHorizontal: Bool = false
     @Published var flipVertical: Bool = false
     // 摄像头实际输出尺寸（由 activeFormat 决定），用于预览按真实比例渲染
@@ -46,26 +45,15 @@ class CaptureManager: NSObject, ObservableObject {
     private let captureSession = AVCaptureSession()
     private var videoDeviceInput: AVCaptureDeviceInput?
     private var videoOutput: AVCaptureVideoDataOutput?
+    private var audioOutput: AVCaptureAudioDataOutput?
     private var previewLayer: AVCaptureVideoPreviewLayer?
 
-    var videoTrack: RTCVideoTrack?
-    var audioTrack: RTCAudioTrack?
-    /// 原画质传输模块，启用后每帧采样都会转发（BGRA 无压缩 TCP）
+    /// 原画质传输模块，启用后每帧视频采样都会转发（BGRA 无压缩 TCP）
     var rawStreamServer: RawStreamServer?
-
-    private let videoSource: RTCVideoSource
-    private let videoCapturer: RTCVideoCapturer
-    private let audioSource: RTCAudioSource
-    private let factory: RTCPeerConnectionFactory
+    /// UDP 音频传输模块，启用后每帧音频采样都会转发（PCM 无压缩 UDP）
+    var audioStreamServer: AudioStreamServer?
 
     override init() {
-        let encoderFactory = RTCDefaultVideoEncoderFactory()
-        let decoderFactory = RTCDefaultVideoDecoderFactory()
-        factory = RTCPeerConnectionFactory(encoderFactory: encoderFactory,
-                                           decoderFactory: decoderFactory)
-        videoSource = factory.videoSource()
-        videoCapturer = RTCVideoCapturer(delegate: videoSource)
-        audioSource = factory.audioSource(with: nil)
         super.init()
     }
 
@@ -120,6 +108,7 @@ class CaptureManager: NSObject, ObservableObject {
 
         captureSession.beginConfiguration()
 
+        // 视频：后置摄像头 + BGRA 输出
         do {
             guard let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera,
                                                             for: .video,
@@ -164,7 +153,7 @@ class CaptureManager: NSObject, ObservableObject {
             }
 
             let videoOutput = AVCaptureVideoDataOutput()
-            // 统一输出 BGRA：WebRTC RTCCVPixelBuffer 支持，同时供原画质 TCP 模块直接发送
+            // 统一输出 BGRA，供原画质 TCP 模块直接发送
             videoOutput.videoSettings = [
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
             ]
@@ -177,10 +166,39 @@ class CaptureManager: NSObject, ObservableObject {
             print("视频配置失败: \(error)")
         }
 
-        captureSession.commitConfiguration()
+        // 音频：麦克风 + 48kHz mono 16-bit PCM 输出（供 UDP 模块直接发送）
+        do {
+            guard let audioDevice = AVCaptureDevice.default(for: .audio) else {
+                print("无法获取麦克风")
+                return
+            }
+            let audioInput = try AVCaptureDeviceInput(device: audioDevice)
+            if captureSession.canAddInput(audioInput) {
+                captureSession.addInput(audioInput)
+            }
 
-        videoTrack = factory.videoTrack(with: videoSource, trackId: "video0")
-        audioTrack = factory.audioTrack(with: audioSource, trackId: "audio0")
+            let audioOutput = AVCaptureAudioDataOutput()
+            // 输出格式：48kHz / 单声道 / 16-bit PCM / 小端 / 交错
+            // 与 AudioStreamServer 中声明的格式必须一致，桌面端据此打开 PyAudio 流
+            audioOutput.audioSettings = [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVSampleRateKey: 48000,
+                AVNumberOfChannelsKey: 1,
+                AVLinearPCMBitDepthKey: 16,
+                AVLinearPCMIsFloatKey: false,
+                AVLinearPCMIsBigEndianKey: false,
+                AVLinearPCMIsNonInterleaved: false
+            ]
+            audioOutput.setSampleBufferDelegate(self, queue: DispatchQueue(label: "audioQueue"))
+            if captureSession.canAddOutput(audioOutput) {
+                captureSession.addOutput(audioOutput)
+                self.audioOutput = audioOutput
+            }
+        } catch {
+            print("音频配置失败: \(error)")
+        }
+
+        captureSession.commitConfiguration()
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             self?.captureSession.startRunning()
@@ -311,17 +329,17 @@ class CaptureManager: NSObject, ObservableObject {
     }
 }
 
-extension CaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate {
+extension CaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate {
 
     func captureOutput(_ output: AVCaptureOutput,
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        let rtcFrame = RTCVideoFrame(buffer: RTCCVPixelBuffer(pixelBuffer: pixelBuffer),
-                                     rotation: ._0,
-                                     timeStampNs: Int64(CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer)) * 1_000_000_000))
-        videoSource.capturer(videoCapturer, didCapture: rtcFrame)
-        // 转发到原画质传输模块（采集格式已为 BGRA，无需转换）
-        rawStreamServer?.processSampleBuffer(sampleBuffer, requiresBGRAConversion: false)
+        if output is AVCaptureVideoDataOutput {
+            // 视频帧转发到原画质 TCP 模块（采集格式已为 BGRA，无需转换）
+            rawStreamServer?.processSampleBuffer(sampleBuffer, requiresBGRAConversion: false)
+        } else if output is AVCaptureAudioDataOutput {
+            // 音频帧转发到 UDP 模块（audioSettings 已配为 PCM16 48kHz mono）
+            audioStreamServer?.processSampleBuffer(sampleBuffer)
+        }
     }
 }

@@ -22,7 +22,7 @@ def main():
     phone_cam_app = PhoneCamApp()
     phone_cam_app.show()
 
-    # 启动后异步拉起内嵌信令服务器 + 自动连接
+    # 启动后异步拉起 TCP 视频接收 + UDP 音频接收
     asyncio.ensure_future(phone_cam_app.start())
 
     # 应用退出时清理资源

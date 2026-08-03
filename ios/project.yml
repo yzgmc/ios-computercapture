@@ -25,9 +25,6 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"
         CLANG_ENABLE_MODULES: YES
         SWIFT_OPTIMIZATION_LEVEL: "-Onone"
-    dependencies:
-      - framework: Pods_PhoneCam.framework
-        implicit: true
 schemes:
   PhoneCam:
     build:

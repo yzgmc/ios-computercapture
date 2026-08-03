@@ -6,37 +6,22 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-server:
+  build-desktop:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Package signaling server + web client
-        run: |
-          mkdir -p signaling-server/signaling
-          cp -r signaling/*.py signaling/requirements.txt signaling-server/signaling/
-          cp -r web signaling-server/web
-          cd signaling-server
-          zip -r ../signaling-server.zip .
-
-      - name: Package web client only
-        run: |
-          zip -r web-client.zip web
 
       - name: Package desktop client
         run: |
           cd desktop
           zip -r ../desktop-client.zip .
 
-      - name: Upload server artifacts
+      - name: Upload desktop artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: server-artifacts
-          path: |
-            signaling-server.zip
-            web-client.zip
-            desktop-client.zip
+          name: desktop-artifacts
+          path: desktop-client.zip
           if-no-files-found: error
 
   build-ios:
@@ -66,19 +51,10 @@ jobs:
         working-directory: ios
         run: xcodegen generate
 
-      - name: Install CocoaPods dependencies
+      - name: Inspect project schemes
         working-directory: ios
         run: |
-          gem install cocoapods
-          pod install --repo-update
-
-      - name: Check Pods signing settings
-        working-directory: ios
-        run: |
-          xcodebuild -showBuildSettings \
-            -project Pods/Pods.xcodeproj \
-            -target Pods-PhoneCam \
-            | grep -E 'CODE_SIGN|PROVISIONING_PROFILE|DEVELOPMENT_TEAM' || true
+          xcodebuild -project PhoneCam.xcodeproj -list
 
       - name: Install signing certificate
         env:
@@ -119,7 +95,7 @@ jobs:
         run: |
           set -o pipefail
           xcodebuild clean archive \
-            -workspace PhoneCam.xcworkspace \
+            -project PhoneCam.xcodeproj \
             -scheme PhoneCam \
             -sdk iphoneos \
             -archivePath $PWD/build/PhoneCam.xcarchive \
@@ -178,15 +154,15 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [build-server, build-ios]
+    needs: [build-desktop, build-ios]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Download server artifacts
+      - name: Download desktop artifacts
         uses: actions/download-artifact@v4
         with:
-          name: server-artifacts
+          name: desktop-artifacts
           path: artifacts
 
       - name: Download iOS artifacts
