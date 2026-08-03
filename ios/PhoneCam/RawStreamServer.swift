@@ -37,9 +37,12 @@ final class RawStreamServer {
     private var frameID: UInt32 = 0
     private(set) var isRunning = false
 
-    // 背压：同一时间只允许 1 帧在途，避免 TCP 缓冲区堆积导致延迟
+    // 背压：允许 3 帧在途，支撑 60fps 流水线发送。
+    // 60fps 每帧 16.7ms，TCP send completion 典型 ~20-30ms，
+    // maxPendingFrames=1 时上限仅 ~33fps（正好对应实测 30 多帧）。
+    // 3 帧在途 = 最多 50ms 延迟，实时视频可接受。
     private var pendingFrameCount = 0
-    private let maxPendingFrames = 1
+    private let maxPendingFrames = 3
     private let pendingLock = NSLock()
 
     // 统计：每秒打印一次 fps 与丢帧
