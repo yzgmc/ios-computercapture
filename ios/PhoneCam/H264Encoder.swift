@@ -105,19 +105,16 @@ final class H264Encoder {
         self.fps = fps
         self.quality = quality
 
-        // 显式要求硬件编码器（VideoToolbox 在支持时自动选择，但显式声明可避免某些设备走软编）。
-        // 不指定 RequiredEncoderID：硬编码 ID 在不同设备/iOS 版本可能不一致，
-        // 让 VideoToolbox 自行挑选硬件编码器更稳健；不可用时下方会回退到默认 spec。
-        let encoderSpec: [CFString: Any] = [
-            kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: true,
-        ]
+        // VideoToolbox 在支持时自动选择硬件编码器，无需显式指定
+        // （kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder 在 iOS 17.4+ 才可用，
+        //  显式指定在 iOS 15.0 部署目标下会编译失败；不指定时 VideoToolbox 仍会优先使用硬编）
         var session: VTCompressionSession?
         let status = VTCompressionSessionCreate(
             allocator: kCFAllocatorDefault,
             width: Int32(width),
             height: Int32(height),
             codecType: kCMVideoCodecType_H264,
-            encoderSpecification: encoderSpec as CFDictionary,
+            encoderSpecification: nil,
             imageBufferAttributes: nil,
             compressedDataAllocator: nil,
             outputCallback: nil,
@@ -125,27 +122,7 @@ final class H264Encoder {
             compressionSessionOut: &session
         )
         guard status == noErr, let session = session else {
-            // 硬件编码器不可用时回退到默认（让 VideoToolbox 自行选择，可能走软编）
-            print("H264Encoder: hardware encoder unavailable (\(status)), retry with default")
-            let fallbackStatus = VTCompressionSessionCreate(
-                allocator: kCFAllocatorDefault,
-                width: Int32(width),
-                height: Int32(height),
-                codecType: kCMVideoCodecType_H264,
-                encoderSpecification: nil,
-                imageBufferAttributes: nil,
-                compressedDataAllocator: nil,
-                outputCallback: nil,
-                refcon: nil,
-                compressionSessionOut: &session
-            )
-            guard fallbackStatus == noErr, let session = session else {
-                print("H264Encoder: VTCompressionSessionCreate failed status=\(fallbackStatus)")
-                return
-            }
-            applyProperties(to: session)
-            self.session = session
-            print("H264Encoder: configured \(width)x\(height) @ \(fps)fps quality=\(quality.rawValue) bitrate=\(currentBitrate/1000)kbps (fallback)")
+            print("H264Encoder: VTCompressionSessionCreate failed status=\(status)")
             return
         }
         applyProperties(to: session)
@@ -242,7 +219,7 @@ final class H264Encoder {
         var frameProps: CFDictionary?
         if pendingForceKeyframe {
             let dict: [CFString: Any] = [
-                VTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue as Any
+                kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue as Any
             ]
             frameProps = dict as CFDictionary
             pendingForceKeyframe = false
