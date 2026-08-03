@@ -19,6 +19,13 @@ final class AudioStreamServer {
     static let formatPCM16LE: UInt8 = 0
     static let formatPCMFloat32LE: UInt8 = 1
 
+    /// 内部 PCM 格式标识
+    private enum PCMFormat {
+        case int16
+        case int32
+        case float
+    }
+
     private var connection: NWConnection?
     private let queue = DispatchQueue(label: "com.yzg.phonecam.audiostream")
     private var seq: UInt32 = 0
@@ -69,20 +76,24 @@ final class AudioStreamServer {
         // 1. 从 sample buffer 的 format description 检测实际音频格式
         guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
 
-        // 用 Core Media API 读取 AudioStreamBasicDescription
-        let basicDesc = CMFormatDescriptionGetBasicDescription(formatDesc)
-        let detectedSampleRate = basicDesc.mSampleRate
-        let detectedChannels = basicDesc.mChannelsPerFrame
-        let bitsPerChannel = basicDesc.mBitsPerChannel
+        // 用 CMAudioFormatDescriptionGetStreamBasicDescription 直接读取 ASBD
+        // （CMFormatDescriptionGetBasicDescription 是非公开 Swift API）
+        var asbd = AudioStreamBasicDescription()
+        let asbdSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        let _ = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc, sizeNeeded: asbdSize, descriptionOut: &asbd)
+        let detectedSampleRate = asbd.mSampleRate
+        let detectedChannels = asbd.mChannelsPerFrame
+        let bitsPerChannel = Int(asbd.mBitsPerChannel)
 
-        // 推断 PCM 格式：基于 mBitsPerChannel
-        let pcmFormat: AVAudioPCMFormat
-        if bitsPerChannel == 32 {
+        // 推断 PCM 格式：基于 mBitsPerChannel 和 mFormatFlags（kAudioFormatFlagIsFloat = 0x1）
+        let isFloat = (asbd.mFormatFlags & 0x1) != 0
+        let pcmFormat: PCMFormat
+        if isFloat {
+            pcmFormat = .float
+        } else if bitsPerChannel == 32 {
             pcmFormat = .int32
-        } else if bitsPerChannel == 16 {
-            pcmFormat = .int16
         } else {
-            pcmFormat = .int16  // 兜底
+            pcmFormat = .int16  // 16-bit 或未知情况统一按 PCM16LE 处理
         }
 
         // 2. 提取原始 PCM 字节
@@ -135,10 +146,6 @@ final class AudioStreamServer {
             // Float32 → Int16
             pcmData = convertFloatToInt16(rawData)
             outputFormat = Self.formatPCM16LE
-
-        @unknown default:
-            print("AudioStream: unsupported PCM format: \(pcmFormat.rawValue)")
-            return
         }
 
         // 4. 更新协议字段（首次检测后固定，避免桌面端频繁重建 PyAudio 流）
