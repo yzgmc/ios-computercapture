@@ -107,7 +107,7 @@ class MainWindow(QMainWindow):
 
         control_layout.addStretch()
         content_layout.addWidget(control_panel, stretch=1)
-        main_layout.addWidget(content_layout, stretch=1)
+        main_layout.addWidget(content_widget, stretch=1)
 
         # 状态栏
         self.status_bar = QStatusBar()
