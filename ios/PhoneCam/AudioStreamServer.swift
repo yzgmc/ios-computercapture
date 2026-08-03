@@ -68,7 +68,7 @@ final class AudioStreamServer {
 
         // 1. 从 sample buffer 的 format description 检测实际音频格式
         guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
-        let avFormat = AVAudioFormat(from: formatDesc)
+        let avFormat = AVAudioFormat(cmAudioFormatDescription: formatDesc)
 
         let detectedSampleRate: Double = avFormat?.sampleRate ?? 44100
         let detectedChannels: AVAudioChannelCount = avFormat?.channelCount ?? 1
