@@ -12,3 +12,9 @@ pyinstaller>=5.13.0
 # USB 直连模式：纯 Python 的 usbmuxd 客户端，无需安装 libimobiledevice
 pymobiledevice3>=3.5.0
 zeroconf>=0.132.0  # 用于 mDNS/USB 多设备发现（可选）
+
+# SRT 推流模式运行时依赖（非 Python 包，需系统安装 libsrt 共享库）：
+#   Windows: 下载 libsrt.dll 放到 PATH，或设置环境变量 PHONECAM_LIBSRT_PATH
+#   macOS:   brew install srt
+#   Linux:   apt install libsrt1.5  (或从源码编译)
+# Python 端通过 ctypes 直接调用 libsrt C API，无需 pip 安装。

@@ -14,14 +14,15 @@ struct ContentView: View {
     @StateObject private var captureManager = CaptureManager()
 
     @State private var isSharing = false
-    // 传输模式：lan / usb
+    // 传输模式：lan / usb / srt
     @State private var transportMode = "lan"
-    // 原画质传输（无压缩 TCP）
+    // 原画质传输（无压缩 TCP / SRT 推流）
     @State private var rawStreamEnabled = true
     @State private var rawStreamHost = "192.168.1.100"  // USB 模式时此值忽略
     @State private var rawStreamPort = "5000"
     @State private var isDiscovering = false
     private let rawStreamServer = RawStreamServer()
+    private let srtStreamServer = SRTStreamServer()
     private let discoveryClient = DiscoveryClient()
 
     // UDP 音频传输
@@ -232,10 +233,11 @@ struct ContentView: View {
 
             if rawStreamEnabled {
                 Divider()
-                // 传输模式选择：局域网 / USB 直连
+                // 传输模式选择：局域网 / USB 直连 / SRT 推流
                 Picker("传输模式", selection: $transportMode) {
                     Text("局域网").tag("lan")
                     Text("USB 直连").tag("usb")
+                    Text("SRT 推流").tag("srt")
                 }
                 .pickerStyle(.segmented)
                 .disabled(isSharing)
@@ -248,13 +250,21 @@ struct ContentView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                } else if transportMode == "srt" {
+                    HStack(spacing: 6) {
+                        Image(systemName: "antenna.radiowaves.left.and.right")
+                            .foregroundStyle(.secondary)
+                        Text("SRT 模式：iPhone 主动连接桌面端 SRT listener，适合公网/不稳定网络。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 HStack(spacing: 12) {
                     Image(systemName: "desktopcomputer")
                         .foregroundStyle(Color.secondaryText)
                         .frame(width: 24)
-                    TextField(transportMode == "usb" ? "127.0.0.1 (USB)" : "桌面 IP",
+                    TextField(transportMode == "usb" ? "127.0.0.1 (USB)" : "桌面 IP / SRT listener IP",
                               text: $rawStreamHost)
                         .textFieldStyle(.roundedBorder)
                         .keyboardType(.decimalPad)
@@ -279,15 +289,22 @@ struct ContentView: View {
                     Image(systemName: "dot.radiowaves.left.and.right")
                         .foregroundStyle(Color.secondaryText)
                         .frame(width: 24)
-                    TextField("TCP 端口", text: $rawStreamPort)
+                    TextField(transportMode == "srt" ? "SRT 端口" : "TCP 端口",
+                              text: $rawStreamPort)
                         .textFieldStyle(.roundedBorder)
                         .keyboardType(.numberPad)
                         .disableAutocorrection(true)
                         .disabled(isSharing)
                 }
-                Text("提示：无压缩传输带宽需求高（720p≈265Mbps），仅建议千兆局域网使用。")
-                    .font(.caption)
-                    .foregroundStyle(Color.secondaryText)
+                if transportMode == "srt" {
+                    Text("提示：SRT 模式桌面端需切换到 SRT listener 模式（默认端口 5000）。音频仍走 LAN UDP，需与桌面同网段。")
+                        .font(.caption)
+                        .foregroundStyle(Color.secondaryText)
+                } else {
+                    Text("提示：无压缩传输带宽需求高（720p≈265Mbps），仅建议千兆局域网使用。")
+                        .font(.caption)
+                        .foregroundStyle(Color.secondaryText)
+                }
             }
         }
         .padding()
@@ -405,23 +422,31 @@ struct ContentView: View {
     // MARK: - 业务逻辑
     private func connect() {
         Task {
-            // USB 模式架构（UsbmuxTcpForwarder 数据流方向）：
-            //   桌面客户端 → PC 127.0.0.1:port → usbmuxd → iOS 127.0.0.1:port → iOS listener
-            // 即：USB 模式下 iOS 端必须是 TCP 服务器（NWListener），
-            //     LAN 模式下 iOS 端是 TCP 客户端（NWConnection 主动连接桌面）。
+            // 传输模式架构：
+            //   LAN: iOS=TCP caller 主动连接桌面 listener，桌面监听 0.0.0.0:5000
+            //   USB: iOS=TCP listener 监听 5000，桌面通过 usbmuxd 桥接访问 iOS 127.0.0.1:5000
+            //   SRT: iOS=SRT caller 主动连接桌面 SRT listener，桌面监听 0.0.0.0:5000
             let isUSB = (transportMode == "usb")
+            let isSRT = (transportMode == "srt")
 
             // 启动传输（不等 ready，先发起）
             var tcpReady = false
             var udpReady = false
             if rawStreamEnabled, let port = UInt16(rawStreamPort) {
-                captureManager.rawStreamServer = rawStreamServer
                 if isUSB {
+                    captureManager.rawStreamServer = rawStreamServer
                     await MainActor.run { statusMessage = "USB 监听中 :\(port)…" }
                     rawStreamServer.startServer(port: port) { ready in
                         tcpReady = ready
                     }
+                } else if isSRT {
+                    captureManager.rawStreamServer = srtStreamServer
+                    await MainActor.run { statusMessage = "SRT 连接中 → \(rawStreamHost):\(port)…" }
+                    srtStreamServer.start(host: rawStreamHost, port: port) { ready in
+                        tcpReady = ready
+                    }
                 } else {
+                    captureManager.rawStreamServer = rawStreamServer
                     rawStreamServer.start(host: rawStreamHost, port: port) { ready in
                         tcpReady = ready
                     }
@@ -429,13 +454,13 @@ struct ContentView: View {
             }
             if audioStreamEnabled, let port = UInt16(audioStreamPort) {
                 captureManager.audioStreamServer = audioStreamServer
-                // 音频 UDP 在两种模式下都主动连接桌面（USB 走 usbmuxd UDP 桥接）
+                // 音频 UDP 在 LAN/SRT 模式下连接桌面端；USB 模式走 127.0.0.1 桥接
                 let effectiveHost = isUSB ? "127.0.0.1" : rawStreamHost
                 audioStreamServer.start(host: effectiveHost, port: port) { ready in
                     udpReady = ready
                 }
             }
-            // 等待 TCP 真正 ready（最多 5 秒），再启动 capture
+            // 等待 TCP/SRT 真正 ready（最多 5 秒），再启动 capture
             let deadline = Date().addingTimeInterval(5.0)
             while (!tcpReady || (rawStreamEnabled && !udpReady)) && Date() < deadline {
                 try? await Task.sleep(nanoseconds: 50_000_000)
@@ -444,18 +469,24 @@ struct ContentView: View {
                 await MainActor.run {
                     if isUSB {
                         statusMessage = "USB 监听失败，请确认桌面端已切换到 USB 模式且 iPhone 已通过 USB 连接"
+                    } else if isSRT {
+                        statusMessage = "SRT 连接失败，请确认桌面端已切换到 SRT 模式且 IP/端口正确"
                     } else {
                         statusMessage = "连接桌面端失败，请检查 IP/端口"
                     }
                 }
                 rawStreamServer.stop()
+                srtStreamServer.stop()
                 audioStreamServer.stop()
                 return
             }
             await captureManager.startCapture()
             await MainActor.run {
                 isSharing = true
-                let mode = isUSB ? "USB" : rawStreamHost
+                let mode: String
+                if isUSB { mode = "USB" }
+                else if isSRT { mode = "SRT→\(rawStreamHost)" }
+                else { mode = rawStreamHost }
                 statusMessage = "已连接 → \(mode):\(rawStreamPort)/\(audioStreamPort)"
             }
         }
@@ -463,7 +494,9 @@ struct ContentView: View {
 
     private func disconnect() {
         Task {
+            // 两个 server 都 stop（idempotent），避免残留连接
             rawStreamServer.stop()
+            srtStreamServer.stop()
             captureManager.rawStreamServer = nil
             audioStreamServer.stop()
             captureManager.audioStreamServer = nil

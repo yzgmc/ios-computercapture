@@ -2,6 +2,9 @@ name: PhoneCam
 options:
   xcodeVersion: "15.0"
   createIntermediateGroups: true
+packages:
+  SRTKit:
+    path: SRTKit
 targets:
   PhoneCam:
     type: application
@@ -11,6 +14,9 @@ targets:
       - PhoneCam
     resources:
       - PhoneCam/Assets.car
+    dependencies:
+      - package: SRTKit
+        product: libsrt
     settings:
       base:
         INFOPLIST_FILE: PhoneCam/Info.plist

@@ -11,6 +11,10 @@ from capture.virtual_device import (
     VirtualCameraOutput, find_default_virtual_audio_device
 )
 from raw_stream import RawStreamReceiver, PixelFormat
+try:
+    from raw_stream import SRTStreamReceiver
+except ImportError:  # srt_transport 导入失败（libsrt 缺失等）
+    SRTStreamReceiver = None
 from audio_stream import AudioStreamReceiver, AudioPlayer
 from discovery import DiscoveryService
 from usb import (
@@ -20,12 +24,13 @@ from usb import (
 
 logger = logging.getLogger(__name__)
 
-RAW_STREAM_PORT = 5000   # TCP 视频原画质
+RAW_STREAM_PORT = 5000   # TCP/SRT 视频原画质
 AUDIO_STREAM_PORT = 5001  # UDP 音频
 
 # 传输模式
 MODE_LAN = "lan"          # 通过 Wi-Fi / 局域网 TCP/UDP
 MODE_USB = "usb"          # 通过 USB + usbmuxd 桥接
+MODE_SRT = "srt"          # 通过 SRT 推流（公网/不稳定网络）
 
 
 class PhoneCamApp(QObject):
@@ -41,6 +46,7 @@ class PhoneCamApp(QObject):
         self.window.volume_changed.connect(self._on_volume_changed)
         self.window.usb_mode_requested.connect(self.enable_usb_mode)
         self.window.lan_mode_requested.connect(self.enable_lan_mode)
+        self.window.srt_mode_requested.connect(self.enable_srt_mode)
 
         self.status_changed.connect(self.window.set_status)
 
@@ -290,13 +296,39 @@ class PhoneCamApp(QObject):
         await self._restart_receivers(listen_host="0.0.0.0")
         self._emit_devices()
 
+    @asyncSlot()
+    async def enable_srt_mode(self):
+        """用户切换到 SRT 模式：用 SRTStreamReceiver 替代 TCP 接收器。
+
+        SRT 模式下桌面端为 listener，iOS 端为 caller 主动连接。
+        音频仍走 UDP（与 LAN 一致），绑定到 0.0.0.0。
+        """
+        if self._mode == MODE_SRT:
+            return
+        if SRTStreamReceiver is None:
+            self.status_changed.emit(
+                "SRT 模式不可用：未安装 libsrt 运行时库（设置 PHONECAM_LIBSRT_PATH 环境变量）"
+            )
+            # 回退 combo 到当前实际模式
+            self._emit_devices()
+            return
+        self._mode = MODE_SRT
+        self._emit_state("info", "切换到 SRT 推流模式")
+        if self.usb_manager:
+            await self.usb_manager.stop()
+        await self._restart_receivers(listen_host="0.0.0.0", use_srt=True)
+        self._emit_devices()
+
     async def _restart_receivers(self, listen_host: str,
-                                 use_tcp_client: bool = False):
+                                 use_tcp_client: bool = False,
+                                 use_srt: bool = False):
         """重启接收器，绑定到 listen_host。
 
         :param use_tcp_client: True=USB 模式，raw_receiver 作为 TCP 客户端
             连接 127.0.0.1:RAW_STREAM_PORT（forwarder 监听端口）；
             False=LAN 模式，raw_receiver 作为 TCP 服务器监听。
+        :param use_srt: True=SRT 模式，使用 SRTStreamReceiver 替代 RawStreamReceiver；
+            iOS 端为 caller 主动连接桌面 listener。
         """
         try:
             await self.raw_receiver.stop()
@@ -306,43 +338,76 @@ class PhoneCamApp(QObject):
             await self.audio_receiver.stop()
         except Exception:
             pass
-        self.raw_receiver = RawStreamReceiver(
-            host=listen_host, port=RAW_STREAM_PORT, on_frame=self._on_raw_frame,
-            on_disconnect=(self._on_usb_disconnect if use_tcp_client else None),
-        )
-        self.audio_receiver = AudioStreamReceiver(
-            host=listen_host, port=AUDIO_STREAM_PORT, on_packet=self._on_audio_packet
-        )
-        if use_tcp_client:
-            # USB 模式：作为客户端连接 forwarder（forwarder 已由 UsbBridgeManager 启动）。
-            # forwarder 启动是异步的，需重试等待端口就绪。
-            connected = False
-            for attempt in range(15):
-                try:
-                    await self.raw_receiver.connect_client("127.0.0.1", RAW_STREAM_PORT)
-                    connected = True
-                    self._emit_state("info", "USB 视频通道已连接")
-                    break
-                except (ConnectionError, OSError) as e:
-                    if attempt == 0:
-                        self._emit_state("info",
-                                         f"等待 USB 桥接就绪… ({attempt + 1}/15)")
-                    elif attempt % 5 == 4:
-                        self._emit_state("info",
-                                         f"仍在等待 USB 桥接… ({attempt + 1}/15)")
-                    await asyncio.sleep(0.5)
-            if not connected:
-                self._emit_state("error", "USB 桥接连接失败：forwarder 未就绪，请确认 iOS 端已启动 USB 模式")
-        else:
+        if use_srt:
+            # SRT 模式：listener 等待 iOS caller
+            try:
+                self.raw_receiver = SRTStreamReceiver(
+                    host=listen_host, port=RAW_STREAM_PORT,
+                    on_frame=self._on_raw_frame,
+                    on_disconnect=self._on_srt_disconnect,
+                )
+            except Exception as e:
+                self._emit_state("error", f"SRT 接收器初始化失败: {e}")
+                return
+            self.audio_receiver = AudioStreamReceiver(
+                host=listen_host, port=AUDIO_STREAM_PORT, on_packet=self._on_audio_packet
+            )
             try:
                 await self.raw_receiver.start()
+                self._emit_state("info",
+                                 f"SRT listener 已启动 :{RAW_STREAM_PORT}，等待 iPhone 推流")
             except Exception as e:
-                self._emit_state("error", f"重启 TCP 接收器失败: {e}")
+                self._emit_state("error", f"SRT 接收器启动失败: {e}")
+        else:
+            self.raw_receiver = RawStreamReceiver(
+                host=listen_host, port=RAW_STREAM_PORT, on_frame=self._on_raw_frame,
+                on_disconnect=(self._on_usb_disconnect if use_tcp_client else None),
+            )
+            self.audio_receiver = AudioStreamReceiver(
+                host=listen_host, port=AUDIO_STREAM_PORT, on_packet=self._on_audio_packet
+            )
+            if use_tcp_client:
+                # USB 模式：作为客户端连接 forwarder（forwarder 已由 UsbBridgeManager 启动）。
+                # forwarder 启动是异步的，需重试等待端口就绪。
+                connected = False
+                for attempt in range(15):
+                    try:
+                        await self.raw_receiver.connect_client("127.0.0.1", RAW_STREAM_PORT)
+                        connected = True
+                        self._emit_state("info", "USB 视频通道已连接")
+                        break
+                    except (ConnectionError, OSError) as e:
+                        if attempt == 0:
+                            self._emit_state("info",
+                                             f"等待 USB 桥接就绪… ({attempt + 1}/15)")
+                        elif attempt % 5 == 4:
+                            self._emit_state("info",
+                                             f"仍在等待 USB 桥接… ({attempt + 1}/15)")
+                        await asyncio.sleep(0.5)
+                if not connected:
+                    self._emit_state("error", "USB 桥接连接失败：forwarder 未就绪，请确认 iOS 端已启动 USB 模式")
+            else:
+                try:
+                    await self.raw_receiver.start()
+                except Exception as e:
+                    self._emit_state("error", f"重启 TCP 接收器失败: {e}")
         try:
             await self.audio_receiver.start()
         except Exception as e:
             self._emit_state("error", f"重启 UDP 接收器失败: {e}")
         self._listen_host = listen_host
+
+    def _on_srt_disconnect(self):
+        """SRT 客户端断开回调。与 USB 不同，SRT listener 保持开启，仅清理解码器缓存。"""
+        if self._mode != MODE_SRT:
+            return
+        self._emit_state("warn", "SRT 推流端断开，等待重连…")
+        # 重置 H.264 解码器：清空参考帧，等下一帧 IDR 重新同步
+        if self._h264_decoder is not None:
+            try:
+                self._h264_decoder.reset()
+            except Exception as e:
+                logger.warning("H264 decoder reset on SRT disconnect failed: %s", e)
 
     async def _on_usb_devices_changed(self, devices: list):
         self.usb_devices = devices

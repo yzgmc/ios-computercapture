@@ -91,8 +91,9 @@ class CaptureManager: NSObject, ObservableObject {
     /// H.264 起流后首帧需强制 IDR，让接收端解码器立即同步
     private var h264NeedsKeyframe = true
 
-    /// 原画质传输模块，启用后每帧视频采样都会转发（BGRA 无压缩 TCP）
-    var rawStreamServer: RawStreamServer? {
+    /// 原画质传输模块，启用后每帧视频采样都会转发（BGRA / JPEG / H.264）。
+    /// 协议类型支持 TCP（RawStreamServer）与 SRT（SRTStreamServer），运行时可切换。
+    var rawStreamServer: VideoStreamTransport? {
         didSet {
             // 重新绑定背压/连接回调（每次设置 server 都要刷新）
             _wireRawStreamCallbacks()

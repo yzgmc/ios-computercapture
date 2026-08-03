@@ -51,6 +51,13 @@ jobs:
         working-directory: ios
         run: xcodegen generate
 
+      - name: Resolve Swift package dependencies
+        working-directory: ios
+        run: |
+          # 显式解析 SPM 包：下载 SRTKit 的 libsrt.xcframework binary target
+          # xcodebuild archive 会自动 resolve，但单独步骤便于早期失败诊断
+          xcodebuild -project PhoneCam.xcodeproj -resolvePackageDependencies
+
       - name: Inspect project schemes
         working-directory: ios
         run: |

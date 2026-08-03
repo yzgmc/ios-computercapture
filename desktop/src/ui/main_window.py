@@ -23,6 +23,7 @@ class MainWindow(QMainWindow):
     volume_changed = pyqtSignal(float)
     usb_mode_requested = pyqtSignal()  # 请求切换到 USB 模式
     lan_mode_requested = pyqtSignal()  # 请求切换到 LAN 模式
+    srt_mode_requested = pyqtSignal()  # 请求切换到 SRT 推流模式
 
     def __init__(self):
         super().__init__()
@@ -42,7 +43,7 @@ class MainWindow(QMainWindow):
         info_layout = QHBoxLayout(info_group)
         info_layout.addWidget(QLabel("模式："))
         self.mode_combo = QComboBox()
-        self.mode_combo.addItems(["局域网 (LAN)", "USB 直连 (USB)"])
+        self.mode_combo.addItems(["局域网 (LAN)", "USB 直连 (USB)", "SRT 推流 (SRT)"])
         info_layout.addWidget(self.mode_combo)
         self.usb_status_label = QLabel("未连接")
         self.usb_status_label.setStyleSheet("color: #888;")
@@ -130,6 +131,7 @@ class MainWindow(QMainWindow):
         self.flip_horizontal_checkbox.toggled.connect(self._emit_flip_changed)
         self.flip_vertical_checkbox.toggled.connect(self._emit_flip_changed)
         self.volume_slider.valueChanged.connect(self._on_volume_slider_changed)
+        self.mode_combo.currentIndexChanged.connect(self._on_mode_combo_changed)
 
     def _emit_flip_changed(self, _checked: bool = False):
         self.flip_changed.emit(
@@ -162,11 +164,20 @@ class MainWindow(QMainWindow):
     def _on_mode_combo_changed(self, idx: int):
         if idx == 1:
             self.usb_mode_requested.emit()
+        elif idx == 2:
+            self.srt_mode_requested.emit()
         else:
             self.lan_mode_requested.emit()
 
     def set_usb_devices(self, devices: list, current_mode: str):
-        """更新 USB 设备状态显示。"""
+        """更新 USB / SRT 设备状态显示。"""
+        if current_mode == "srt":
+            self.mode_combo.blockSignals(True)
+            self.mode_combo.setCurrentIndex(2)
+            self.mode_combo.blockSignals(False)
+            self.usb_status_label.setText("SRT listener 监听中")
+            self.usb_status_label.setStyleSheet("color: #00aa66;")
+            return
         if current_mode != "usb":
             self.mode_combo.blockSignals(True)
             self.mode_combo.setCurrentIndex(0)

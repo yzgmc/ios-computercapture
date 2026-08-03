@@ -38,7 +38,7 @@ enum BackpressureLevel: Int {
 /// - 带宽估计器：基于 send completion 的指数移动平均，输出 bytes/sec；
 /// - 背压等级回调：让 CaptureManager 触发自适应码率调整；
 /// - 客户端连接/断开回调：新客户端接入时强制 IDR 关键帧。
-final class RawStreamServer {
+final class RawStreamServer: VideoStreamTransport {
     static let headerSize = 28
     private static let magic: [UInt8] = [0x52, 0x41, 0x57, 0x31] // "RAW1"
 
