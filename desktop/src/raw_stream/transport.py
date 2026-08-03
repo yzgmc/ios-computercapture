@@ -6,6 +6,7 @@
 """
 import asyncio
 import logging
+import time
 
 from .protocol import HEADER_SIZE, is_valid_header, unpack_header
 
@@ -19,13 +20,16 @@ class RawStreamReceiver:
     """TCP 原画质帧接收器。"""
 
     def __init__(self, host: str = "0.0.0.0", port: int = 5000,
-                 on_frame=None, max_buffered_frames: int = 4):
+                 on_frame=None, max_buffered_frames: int = 1):
         self.host = host
         self.port = port
         self.on_frame = on_frame
         self._max_buffered = max_buffered_frames
         self._server: asyncio.AbstractServer | None = None
         self._frame_count = 0
+        # 接收 fps 统计
+        self._recv_t0: float | None = None
+        self._recv_n: int = 0
 
     async def start(self):
         self._server = await asyncio.start_server(
@@ -83,10 +87,22 @@ class RawStreamReceiver:
                     break
 
                 self._frame_count += 1
+                self._recv_n += 1
+                now = time.monotonic()
+                if self._recv_t0 is None:
+                    self._recv_t0 = now
                 if self._frame_count == 1:
                     logger.info("RawStream first frame: %dx%d bpr=%d payload=%d",
                                 fields["width"], fields["height"],
                                 fields["bytes_per_row"], payload_length)
+                # 每秒打印一次接收 fps
+                elapsed = now - self._recv_t0
+                if elapsed >= 1.0:
+                    fps = self._recv_n / elapsed
+                    logger.info("RawStream recv %.1f fps (total=%d, payload=%d KB)",
+                                fps, self._frame_count, payload_length // 1024)
+                    self._recv_t0 = now
+                    self._recv_n = 0
                 if self.on_frame:
                     try:
                         self.on_frame(
@@ -96,8 +112,6 @@ class RawStreamReceiver:
                         )
                     except Exception as e:
                         logger.error("on_frame callback error: %s", e)
-                if self._frame_count % 60 == 0:
-                    logger.info("RawStream received %d frames", self._frame_count)
         except ConnectionResetError:
             logger.info("RawStream connection reset by %s", peer)
         except Exception as e:

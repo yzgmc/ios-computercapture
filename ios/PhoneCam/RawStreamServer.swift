@@ -37,6 +37,16 @@ final class RawStreamServer {
     private var frameID: UInt32 = 0
     private(set) var isRunning = false
 
+    // 背压：同一时间只允许 1 帧在途，避免 TCP 缓冲区堆积导致延迟
+    private var pendingFrameCount = 0
+    private let maxPendingFrames = 1
+    private let pendingLock = NSLock()
+
+    // 统计：每秒打印一次 fps 与丢帧
+    private var sentCount: UInt64 = 0
+    private var droppedCount: UInt64 = 0
+    private var lastStatsTime: Date = Date()
+
     /// 连接到桌面端 TCP 端口。onReady 在 NWConnection.state == .ready 时回调。
     func start(host: String, port: UInt16, onReady: ((Bool) -> Void)? = nil) {
         guard !isRunning else {
@@ -96,9 +106,22 @@ final class RawStreamServer {
                              requiresBGRAConversion: Bool = false) {
         guard isRunning, let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
+        // 背压：上一帧还没发完就丢弃当前帧（实时视频丢一帧无影响，但延迟会累积）
+        pendingLock.lock()
+        if pendingFrameCount >= maxPendingFrames {
+            droppedCount &+= 1
+            pendingLock.unlock()
+            return
+        }
+        pendingFrameCount += 1
+        pendingLock.unlock()
+
         let buffer: CVPixelBuffer
         if requiresBGRAConversion {
-            guard let converted = convertToBGRA(pixelBuffer) else { return }
+            guard let converted = convertToBGRA(pixelBuffer) else {
+                self._decrementPending()
+                return
+            }
             buffer = converted
         } else {
             buffer = pixelBuffer
@@ -110,14 +133,15 @@ final class RawStreamServer {
         let width = CVPixelBufferGetWidth(buffer)
         let height = CVPixelBufferGetHeight(buffer)
         let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
-        guard let basePtr = CVPixelBufferGetBaseAddress(buffer) else { return }
+        guard let basePtr = CVPixelBufferGetBaseAddress(buffer) else {
+            self._decrementPending()
+            return
+        }
 
         let payloadLength = bytesPerRow * height
         let currentFrameID = frameID
         frameID &+= 1
 
-        // 用 append 方式构造 Data：Data 类型对 append 操作做了正确的
-        // copy-on-write 优化，buffer 在闭包外依然有效。
         // 帧头 28B 大端序：magic(4) + frame_id(4) + width(4) + height(4)
         //               + format(4) + bytes_per_row(4) + payload_length(4)
         var packet = Data(capacity: Self.headerSize + payloadLength)
@@ -133,15 +157,32 @@ final class RawStreamServer {
                       count: payloadLength)
 
         send(packet)
-        // 前 5 帧强制打印（诊断），之后每 60 帧一次
-        if currentFrameID < 5 || currentFrameID % 60 == 0 {
-            let hex = packet.prefix(28).map { String(format: "%02x", $0) }.joined(separator: " ")
-            print("RawStream: sent frame \(currentFrameID) (\(width)x\(height) payload=\(payloadLength)) header=\(hex)")
+        sentCount &+= 1
+
+        // 每秒打印一次统计（fps + 丢帧率）
+        let now = Date()
+        if now.timeIntervalSince(lastStatsTime) >= 1.0 {
+            let elapsed = now.timeIntervalSince(lastStatsTime)
+            let sendFps = Double(sentCount) / elapsed
+            let dropFps = Double(droppedCount) / elapsed
+            print(String(format: "RawStream: %.1f fps sent, %.1f fps dropped (pending=%d)",
+                         sendFps, dropFps, pendingFrameCount))
+            sentCount = 0
+            droppedCount = 0
+            lastStatsTime = now
         }
     }
 
+    private func _decrementPending() {
+        pendingLock.lock()
+        pendingFrameCount -= 1
+        pendingLock.unlock()
+    }
+
     private func send(_ data: Data) {
-        connection?.send(content: data, completion: .contentProcessed { error in
+        connection?.send(content: data, completion: .contentProcessed { [weak self] error in
+            // 发送完成才允许下一帧进入（背压）
+            self?._decrementPending()
             if let error = error {
                 print("RawStream send error: \(error)")
             }
