@@ -75,7 +75,10 @@ final class RawStreamServer {
         let width = CVPixelBufferGetWidth(buffer)
         let height = CVPixelBufferGetHeight(buffer)
         let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
-        guard let baseAddress = CVPixelBufferGetBaseAddress(buffer) else { return }
+        // baseAddress 是 UnsafeMutableRawPointer（非可选），但理论上可能为 NULL
+        // 用 Int 指针地址判 NULL 比 optional 转换更直接
+        guard let basePtr = CVPixelBufferGetBaseAddress(buffer),
+              Int(bitPattern: basePtr) != 0 else { return }
 
         let payloadLength = bytesPerRow * height
         let currentFrameID = frameID
@@ -119,9 +122,8 @@ final class RawStreamServer {
             }
 
             // payload: 直接 memcpy 避免 Data 二次拷贝
-            if let src = baseAddress {
-                memcpy(p + Self.headerSize, src, payloadLength)
-            }
+            // basePtr 是 UnsafeMutableRawPointer?
+            memcpy(p + Self.headerSize, basePtr, payloadLength)
         }
 
         send(packet)
