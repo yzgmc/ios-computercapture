@@ -76,11 +76,12 @@ final class AudioStreamServer {
         // 1. 从 sample buffer 的 format description 检测实际音频格式
         guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
 
-        // 用 CMAudioFormatDescriptionGetStreamBasicDescription 直接读取 ASBD
-        // （CMFormatDescriptionGetBasicDescription 是非公开 Swift API）
-        var asbd = AudioStreamBasicDescription()
-        let asbdSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-        let _ = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc, sizeNeeded: asbdSize, descriptionOut: &asbd)
+        // 用 CMAudioFormatDescriptionGetStreamBasicDescription 直接读取 ASBD 指针
+        // Swift 签名：func ...(_ desc: CMFormatDescription) -> UnsafePointer<AudioStreamBasicDescription>?
+        guard let asbdPtr = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc) else {
+            return
+        }
+        let asbd = asbdPtr.pointee
         let detectedSampleRate = asbd.mSampleRate
         let detectedChannels = asbd.mChannelsPerFrame
         let bitsPerChannel = Int(asbd.mBitsPerChannel)
