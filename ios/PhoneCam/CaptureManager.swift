@@ -360,10 +360,12 @@ extension CaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptur
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
 
         // 硬件 JPEG 编码，质量 0.85 视觉接近无损
+        // CIContext.jpegRepresentation 的 options 是 [CIImageRepresentationOption: Any]
+        // 而 lossQuality 在 CIImage 选项中是 kCIImageRepresentationLossyCompressionQuality
         guard let jpegData = ciContext.jpegRepresentation(
             of: ciImage,
             colorSpace: CGColorSpaceCreateDeviceRGB(),
-            options: [kCGImageDestinationLossyCompressionQuality as String: 0.85]
+            options: [kCIImageRepresentationLossyCompressionQuality as CIImageRepresentationOption: 0.85]
         ) else { return }
 
         rawStreamServer?.processJPEGFrame(jpegData, width: width, height: height)
