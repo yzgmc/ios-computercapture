@@ -1,7 +1,23 @@
 import Foundation
 import Network
-import CoreMedia
 import CoreVideo
+import CoreMedia
+
+/// UInt32 的大端序 4 字节 Data 视图
+private extension UInt32 {
+    var bigEndianData: Data {
+        var be = self.bigEndian
+        return Data(bytes: &be, count: 4)
+    }
+}
+
+/// 整型大端序 4 字节 Data 视图
+private extension Int32 {
+    var bigEndianData: Data {
+        var be = self.bigEndian
+        return Data(bytes: &be, count: 4)
+    }
+}
 
 /// 原画质无压缩视频传输：将采集到的 CVPixelBuffer 以 BGRA 像素通过 TCP 整帧发送到桌面端。
 ///
@@ -75,56 +91,27 @@ final class RawStreamServer {
         let width = CVPixelBufferGetWidth(buffer)
         let height = CVPixelBufferGetHeight(buffer)
         let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
-        // baseAddress 是 UnsafeMutableRawPointer（非可选），但理论上可能为 NULL
-        // 用 Int 指针地址判 NULL 比 optional 转换更直接
-        guard let basePtr = CVPixelBufferGetBaseAddress(buffer),
-              Int(bitPattern: basePtr) != 0 else { return }
+        guard let basePtr = CVPixelBufferGetBaseAddress(buffer) else { return }
 
         let payloadLength = bytesPerRow * height
         let currentFrameID = frameID
         frameID &+= 1
 
-        // 单次 send 合并帧头与 payload，避免两次 send 导致接收方读到的字节流交错
-        // 帧头 28B 大端序：magic(4) + frame_id(4) + width(4) + height(4) + format(4) + bytes_per_row(4) + payload_length(4)
-        // 一次性分配并用 memcpy 写入，避免 Data.append 多次扩容
-        var packet = Data(count: Self.headerSize + payloadLength)
-        packet.withUnsafeMutableBytes { raw in
-            guard let p = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
-
-            // magic (4B)
-            for i in 0..<4 { p[i] = Self.magic[i] }
-            // frame_id (4B, big-endian)
-            var fid = currentFrameID.bigEndian
-            withUnsafeBytes(of: &fid) { fidPtr in
-                for i in 0..<4 { p[4 + i] = fidPtr.load(fromByteOffset: i, as: UInt8.self) }
-            }
-            // width (4B, BE)
-            var w = UInt32(width).bigEndian
-            withUnsafeBytes(of: &w) { ptr in
-                for i in 0..<4 { p[8 + i] = ptr.load(fromByteOffset: i, as: UInt8.self) }
-            }
-            // height (4B, BE)
-            var h = UInt32(height).bigEndian
-            withUnsafeBytes(of: &h) { ptr in
-                for i in 0..<4 { p[12 + i] = ptr.load(fromByteOffset: i, as: UInt8.self) }
-            }
-            // format (4B=0 BGRA, BE)
-            for i in 0..<4 { p[16 + i] = 0 }
-            // bytes_per_row (4B, BE)
-            var bpr = UInt32(bytesPerRow).bigEndian
-            withUnsafeBytes(of: &bpr) { ptr in
-                for i in 0..<4 { p[20 + i] = ptr.load(fromByteOffset: i, as: UInt8.self) }
-            }
-            // payload_length (4B, BE)
-            var plen = UInt32(payloadLength).bigEndian
-            withUnsafeBytes(of: &plen) { ptr in
-                for i in 0..<4 { p[24 + i] = ptr.load(fromByteOffset: i, as: UInt8.self) }
-            }
-
-            // payload: 直接 memcpy 避免 Data 二次拷贝
-            // basePtr 是 UnsafeMutableRawPointer?
-            memcpy(p + Self.headerSize, basePtr, payloadLength)
-        }
+        // 用 append 方式构造 Data：Data 类型对 append 操作做了正确的
+        // copy-on-write 优化，buffer 在闭包外依然有效。
+        // 帧头 28B 大端序：magic(4) + frame_id(4) + width(4) + height(4)
+        //               + format(4) + bytes_per_row(4) + payload_length(4)
+        var packet = Data(capacity: Self.headerSize + payloadLength)
+        packet.append(contentsOf: Self.magic)                // magic "RAW1"
+        packet.append(UInt32(currentFrameID).bigEndianData) // frame_id BE
+        packet.append(UInt32(width).bigEndianData)          // width BE
+        packet.append(UInt32(height).bigEndianData)         // height BE
+        packet.append(UInt32(0).bigEndianData)              // format=0 BGRA
+        packet.append(UInt32(bytesPerRow).bigEndianData)    // bytes_per_row BE
+        packet.append(UInt32(payloadLength).bigEndianData)  // payload_length BE
+        // payload：直接从 CVPixelBuffer 拷贝
+        packet.append(basePtr.assumingMemoryBound(to: UInt8.self),
+                      count: payloadLength)
 
         send(packet)
     }
