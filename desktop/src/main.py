@@ -22,14 +22,16 @@ def main():
     phone_cam_app = PhoneCamApp()
     phone_cam_app.show()
 
-    # 启动后异步拉起 TCP 视频接收 + UDP 音频接收
-    asyncio.ensure_future(phone_cam_app.start())
-
     # 应用退出时清理资源
     async def _on_quit():
         await phone_cam_app.shutdown()
 
-    app.aboutToQuit.connect(lambda: asyncio.ensure_future(_on_quit()))
+    app.aboutToQuit.connect(lambda: loop.call_soon_threadsafe(
+        asyncio.ensure_future, _on_quit()
+    ))
+
+    # 在事件循环启动后再调度 start()，避免 DeprecationWarning
+    loop.call_soon_threadsafe(asyncio.ensure_future, phone_cam_app.start())
 
     with loop:
         loop.run_forever()
