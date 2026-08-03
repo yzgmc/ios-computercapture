@@ -30,10 +30,15 @@ class H264Decoder:
         try:
             import av
             self._codec = av.CodecContext.create("h264", "r")
-            # 低延迟解码：减少缓冲，尽快输出帧
-            self._codec.low_delay = True
-            self._codec.thread_type = "NONE"  # 单线程，降低延迟
-            logger.info("H264Decoder: PyAV h264 decoder initialized")
+            # 低延迟解码配置（属性在不同 PyAV 版本可用性不同，逐项尝试）
+            # thread_type="NONE" 单线程降低延迟；low_delay 在部分版本不存在
+            for prop, val in [("thread_type", "NONE"), ("low_delay", True)]:
+                try:
+                    setattr(self._codec, prop, val)
+                except (AttributeError, TypeError):
+                    pass  # 该版本不支持此属性，跳过
+            logger.info("H264Decoder: PyAV h264 decoder initialized (av %s)",
+                        getattr(av, "__version__", "unknown"))
         except Exception as e:
             logger.error("H264Decoder: failed to init PyAV h264 decoder: %s", e)
             self._codec = None

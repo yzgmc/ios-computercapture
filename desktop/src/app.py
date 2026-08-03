@@ -114,6 +114,9 @@ class PhoneCamApp(QObject):
                 if self._h264_decoder is None:
                     from raw_stream.h264_decoder import H264Decoder
                     self._h264_decoder = H264Decoder()
+                    if self._h264_decoder._codec is None:
+                        self._emit_state("error",
+                                         "H.264 解码器初始化失败，请确认已安装 av 包 (pip install av)")
                 rgb = self._h264_decoder.decode(raw)
                 if rgb is None:
                     return  # 解码器缓冲，等待更多输入
