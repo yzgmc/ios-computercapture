@@ -33,6 +33,22 @@ enum CaptureResolution: CaseIterable, Identifiable {
     }
 }
 
+/// 视频编码方式（决定 RawStreamServer 发送的 format 字段）。
+/// - h264: H.264 硬件编码（VTCompressionSession），1080p60 稳定、带宽 ~8Mbps，推荐。
+/// - jpeg: JPEG 85 软件编码（ImageIO），中等负载，带宽 ~15-20Mbps。
+/// - bgra: BGRA 无压缩，带宽极高（1080p60 ≈ 500MB/s），仅千兆/USB3 可用。
+enum VideoCodec: String, CaseIterable, Identifiable {
+    case h264, jpeg, bgra
+    var id: Self { self }
+    var label: String {
+        switch self {
+        case .h264: return "H.264 硬件编码 (1080p60 推荐)"
+        case .jpeg: return "JPEG 85"
+        case .bgra: return "BGRA 无压缩"
+        }
+    }
+}
+
 class CaptureManager: NSObject, ObservableObject {
     @Published var selectedResolution: CaptureResolution = .p720 {
         didSet { Task { await reconfigureCapture() } }
@@ -45,8 +61,10 @@ class CaptureManager: NSObject, ObservableObject {
     @Published var flipVertical: Bool = false
     // 摄像头实际输出尺寸（由 activeFormat 决定），用于预览按真实比例渲染
     @Published var actualCaptureSize: CGSize = CGSize(width: 1280, height: 720)
-    /// 压缩模式：false=BGRA 无压缩(带宽高), true=JPEG 85(1080p 60fps 可行)
-    @Published var useJPEGCompression: Bool = true
+    /// 视频编码方式：H.264 硬件编码（推荐）/ JPEG / BGRA 无压缩
+    @Published var videoCodec: VideoCodec = .h264 {
+        didSet { Task { await reconfigureEncoder() } }
+    }
 
     private let captureSession = AVCaptureSession()
     private var videoDeviceInput: AVCaptureDeviceInput?
@@ -56,6 +74,10 @@ class CaptureManager: NSObject, ObservableObject {
 
     /// JPEG 编码复用的 CIContext（避免每帧重建）
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+    /// H.264 硬件编码器（按实际采集尺寸/fps 配置，懒初始化）
+    private let h264Encoder = H264Encoder()
+    /// H.264 起流后首帧需强制 IDR，让接收端解码器立即同步
+    private var h264NeedsKeyframe = true
 
     /// 原画质传输模块，启用后每帧视频采样都会转发（BGRA 无压缩 TCP）
     var rawStreamServer: RawStreamServer?
@@ -275,6 +297,9 @@ class CaptureManager: NSObject, ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             self?.captureSession.stopRunning()
         }
+        // 释放 H.264 编码器；下次 startCapture 后会按新尺寸重新配置
+        h264Encoder.teardown()
+        h264NeedsKeyframe = true
     }
 
     private func requestAuthorization() async -> Bool {
@@ -337,10 +362,14 @@ extension CaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptur
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
         if output is AVCaptureVideoDataOutput {
-            if useJPEGCompression {
-                // JPEG 压缩路径：1080p 60fps 必需，带宽降到 ~10-20 MB/s
+            switch videoCodec {
+            case .h264:
+                // H.264 硬件编码路径：1080p60 稳定，带宽 ~8Mbps
+                processVideoFrameAsH264(sampleBuffer)
+            case .jpeg:
+                // JPEG 压缩路径：带宽 ~15-20 MB/s
                 processVideoFrameAsJPEG(sampleBuffer)
-            } else {
+            case .bgra:
                 // BGRA 无压缩路径：带宽极高（1080p60 ≈ 500 MB/s），仅 WiFi 6/USB 3 可用
                 rawStreamServer?.processSampleBuffer(sampleBuffer, requiresBGRAConversion: false)
             }
@@ -389,5 +418,49 @@ extension CaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptur
         guard CGImageDestinationFinalize(dest) else { return }
 
         rawStreamServer?.processJPEGFrame(mutableData as Data, width: width, height: height)
+    }
+
+    /// H.264 硬件编码路径：CVPixelBuffer → VTCompressionSession → Annex-B NAL → RawStreamServer。
+    /// format=20 (H264) 时，payload 为一个 Access Unit（关键帧含 SPS/PPS+IDR），
+    /// 桌面端用 PyAV/ffmpeg 解码。
+    private func processVideoFrameAsH264(_ sampleBuffer: CMSampleBuffer) {
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+
+        // 懒配置：首次或尺寸/fps 变化时（re）创建 VTCompressionSession
+        h264Encoder.configure(width: width, height: height, fps: fps)
+
+        // 起流首帧强制 IDR，确保接收端解码器立即拿到关键帧
+        let forceKey = h264NeedsKeyframe
+        if forceKey { h264NeedsKeyframe = false }
+
+        // 设置编码输出回调（每次都设，确保 rawStreamServer 引用最新）
+        h264Encoder.onFrame = { [weak self] data, isKeyframe in
+            self?.rawStreamServer?.processH264Frame(data, width: width, height: height,
+                                                     isKeyframe: isKeyframe)
+        }
+
+        h264Encoder.encode(pixelBuffer, forceKeyframe: forceKey)
+    }
+}
+
+extension CaptureManager {
+    /// 编码方式切换时的处理：H.264 编码器需重新配置（下次 processVideoFrameAsH264 触发），
+    /// 切换到 H.264 时强制下一帧为 IDR。
+    private func reconfigureEncoder() async {
+        if videoCodec == .h264 {
+            h264NeedsKeyframe = true
+            // 用当前已知尺寸/fps 重新配置（若已采集，actualCaptureSize 有值）
+            let w = Int(actualCaptureSize.width)
+            let h = Int(actualCaptureSize.height)
+            if w > 0 && h > 0 {
+                h264Encoder.configure(width: w, height: h, fps: fps)
+            }
+        } else {
+            // 切换离开 H.264：释放编码器资源
+            h264Encoder.teardown()
+            h264NeedsKeyframe = true
+        }
     }
 }

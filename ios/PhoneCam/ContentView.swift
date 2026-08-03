@@ -151,15 +151,16 @@ struct ContentView: View {
 
             Divider()
 
-            // 压缩模式：JPEG 85 (推荐) 或 BGRA 无压缩
+            // 编码方式：H.264 硬件编码 (推荐) / JPEG / BGRA 无压缩
             HStack {
-                Text("压缩模式")
+                Text("编码方式")
                     .font(.subheadline)
                     .foregroundStyle(Color.secondaryText)
                 Spacer()
-                Picker("压缩", selection: $captureManager.useJPEGCompression) {
-                    Text("JPEG 85 (1080p60)").tag(true)
-                    Text("BGRA 无压缩").tag(false)
+                Picker("编码", selection: $captureManager.videoCodec) {
+                    ForEach(VideoCodec.allCases) { codec in
+                        Text(codec.label).tag(codec)
+                    }
                 }
                 .pickerStyle(.menu)
                 .disabled(isSharing)

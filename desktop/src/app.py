@@ -66,6 +66,9 @@ class PhoneCamApp(QObject):
 
         self.raw_frame_received.connect(self._display_raw_frame)
 
+        # H.264 解码器（懒初始化，仅在收到 format=H264 帧时创建）
+        self._h264_decoder = None
+
         # USB 直连管理器（pymobiledevice3 + usbmuxd）
         self.usb_manager: UsbBridgeManager | None = None
         self.usb_devices: list[dict] = []
@@ -99,14 +102,30 @@ class PhoneCamApp(QObject):
 
     def _display_raw_frame(self, raw: bytes, width: int, height: int,
                            pixel_format: int, bytes_per_row: int):
-        """在主线程将原始帧渲染到预览控件。支持 BGRA(0) 和 JPEG(10)。"""
+        """在主线程将原始帧渲染到预览控件。支持 H264(20) / JPEG(10) / BGRA(0)。"""
         try:
             import cv2
             import numpy as np
             from PIL import Image
             import io
 
-            if pixel_format == PixelFormat.JPEG:
+            if pixel_format == PixelFormat.H264:
+                # H.264 解码：raw 是 Annex-B Access Unit
+                if self._h264_decoder is None:
+                    from raw_stream.h264_decoder import H264Decoder
+                    self._h264_decoder = H264Decoder()
+                rgb = self._h264_decoder.decode(raw)
+                if rgb is None:
+                    return  # 解码器缓冲，等待更多输入
+                if not getattr(self, "_raw_first_frame_logged", False):
+                    logger.info("Raw stream first H264 frame: %dx%d payload=%d",
+                                width, height, len(raw))
+                    self._raw_first_frame_logged = True
+                    self.window.set_actual_resolution(width, height)
+                    if not self.virtual_camera.enabled:
+                        self.virtual_camera.width = width
+                        self.virtual_camera.height = height
+            elif pixel_format == PixelFormat.JPEG:
                 # JPEG 解码：raw 是 JPEG 字节流
                 try:
                     img = Image.open(io.BytesIO(raw))

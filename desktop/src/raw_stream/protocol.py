@@ -26,6 +26,7 @@ class PixelFormat:
     RGBA = 1
     YUV422 = 2  # (U Y V Y 打包)
     JPEG = 10   # JPEG 编码的 BGRA，payload 是 JPEG 字节流
+    H264 = 20   # H.264 编码，payload 是 Annex-B 格式 Access Unit（关键帧含 SPS/PPS+IDR）
 
 
 def pack_header(frame_id: int, width: int, height: int,

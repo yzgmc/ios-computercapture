@@ -282,6 +282,52 @@ final class RawStreamServer {
         }
     }
 
+    /// 发送 H.264 编码帧。format=20, bytes_per_row=0, payload=Annex-B Access Unit。
+    /// 关键帧 payload 含 SPS+PPS+IDR，P 帧仅含 P-slice。桌面端用 PyAV 解码。
+    /// - Parameter isKeyframe: 是否为关键帧（仅用于统计，不影响协议）
+    func processH264Frame(_ h264Data: Data, width: Int, height: Int, isKeyframe: Bool) {
+        guard isRunning else { return }
+
+        // 背压
+        pendingLock.lock()
+        if pendingFrameCount >= maxPendingFrames {
+            droppedCount &+= 1
+            pendingLock.unlock()
+            return
+        }
+        pendingFrameCount += 1
+        pendingLock.unlock()
+
+        let currentFrameID = frameID
+        frameID &+= 1
+
+        // 帧头 28B：format=20 (H264), bytes_per_row=0
+        var packet = Data(capacity: Self.headerSize + h264Data.count)
+        packet.append(contentsOf: Self.magic)
+        packet.append(UInt32(currentFrameID).bigEndianData)
+        packet.append(UInt32(width).bigEndianData)
+        packet.append(UInt32(height).bigEndianData)
+        packet.append(UInt32(20).bigEndianData)               // format=20 H264
+        packet.append(UInt32(0).bigEndianData)                // bytes_per_row=0
+        packet.append(UInt32(h264Data.count).bigEndianData)   // payload_length
+        packet.append(h264Data)
+
+        send(packet)
+        sentCount &+= 1
+
+        let now = Date()
+        if now.timeIntervalSince(lastStatsTime) >= 1.0 {
+            let elapsed = now.timeIntervalSince(lastStatsTime)
+            let sendFps = Double(sentCount) / elapsed
+            let dropFps = Double(droppedCount) / elapsed
+            print(String(format: "RawStream(H264): %.1f fps sent, %.1f fps dropped (pending=%d, key=%d)",
+                         sendFps, dropFps, pendingFrameCount, isKeyframe ? 1 : 0))
+            sentCount = 0
+            droppedCount = 0
+            lastStatsTime = now
+        }
+    }
+
     private func send(_ data: Data) {
         connection?.send(content: data, completion: .contentProcessed { [weak self] error in
             // 发送完成才允许下一帧进入（背压）
