@@ -4,45 +4,120 @@ import VideoToolbox
 import CoreVideo
 import CoreMedia
 
+/// 编码质量预设。决定 profile / 码率系数 / 熵编码方式。
+/// - low: Main profile + CAVLC + 0.05 bpp，带宽紧张场景
+/// - medium: Main profile + CABAC + 0.10 bpp，默认平衡
+/// - high: High profile + CABAC + 0.15 bpp，高保真（USB/Wi-Fi6 推荐）
+enum H264Quality: String, CaseIterable {
+    case low, medium, high
+
+    /// bits-per-pixel 系数。最终码率 = width * height * fps * bpp。
+    var bpp: Double {
+        switch self {
+        case .low: return 0.05
+        case .medium: return 0.10
+        case .high: return 0.15
+        }
+    }
+
+    var profileLevel: CFString {
+        switch self {
+        case .low, .medium:
+            return kVTProfileLevel_H264_Main_AutoLevel
+        case .high:
+            return kVTProfileLevel_H264_High_AutoLevel
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .low: return "低 (省流)"
+        case .medium: return "中 (平衡)"
+        case .high: return "高 (高保真)"
+        }
+    }
+}
+
 /// H.264 硬件编码器封装（VTCompressionSession）。
 ///
 /// 输入：AVCaptureVideoDataOutput 输出的 CVPixelBuffer（BGRA）。
 /// 输出：Annex-B 格式 H.264 NAL 字节流（每个 encode 调用对应一个 Access Unit，
 ///       关键帧 AU 包含 SPS+PPS+IDR，P 帧 AU 仅含 P-slice）。
 ///
-/// 设计要点：
-/// - 实时优先：关闭 B 帧（AllowFrameReordering=false）、开启 RealTime；
-/// - 硬件优先：VTCompressionSession 自动选择 VideoToolbox 硬件编码器；
+/// 设计要点（v2 优化版）：
+/// - 实时优先：关闭 B 帧（AllowFrameReordering=false）、RealTime=true、AllowOpenGOP=false；
+/// - 硬件加速：显式启用 VideoToolbox 硬件编码器；
+/// - 高效压缩：medium/high 使用 CABAC 熵编码（仅 High/Main profile 支持）；
 /// - GOP=60 帧（1 秒 @60fps），保证快速重同步与低延迟；
-/// - 输出 NAL 用 4 字节长度前缀（AVCC）→ 转换为 Annex-B 起始码 00 00 00 01，
-///   便于桌面端 ffmpeg/PyAV 直接解码。
+/// - 动态码率：runtime 通过 setBitrate() 调整，无需重建 session；
+/// - 强制关键帧：通过 VTEncodeFrameOptionKey_ForceKeyFrame 在流切换/断线重连时立即 IDR；
+/// - 输出 AVCC → 转 Annex-B（startCode 00 00 00 01）便于桌面端 PyAV/ffmpeg 解码。
 final class H264Encoder {
     private var session: VTCompressionSession?
     private var width: Int = 0
     private var height: Int = 0
+    private var fps: Int = 60
+    private var quality: H264Quality = .medium
+    /// 当前平均码率（bps），用于动态调整与统计。
+    private(set) var currentBitrate: Int = 0
+    /// 当前 GOP（帧数）。
+    private var gopSize: Int = 60
 
     /// 编码完成回调：data 是一个 Access Unit（Annex-B），isKeyframe 标识是否含 SPS/PPS+IDR。
     var onFrame: ((Data, Bool) -> Void)?
 
     /// 初始化/重置编码器。调用时机：采集启动后已知实际分辨率时。
-    func configure(width: Int, height: Int, fps: Int) {
-        if self.session != nil && self.width == width && self.height == height {
-            return  // 已配置且尺寸未变
+    /// - Parameters:
+    ///   - quality: 质量预设，决定 profile/bpp/熵编码
+    ///   - forceRecreate: 强制重建 session（profile 切换时必须）
+    func configure(width: Int, height: Int, fps: Int,
+                   quality: H264Quality = .medium,
+                   forceRecreate: Bool = false) {
+        // 已配置且尺寸/质量未变 → 跳过
+        if !forceRecreate,
+           self.session != nil,
+           self.width == width,
+           self.height == height,
+           self.quality == quality {
+            // fps 变化也只需更新 ExpectedFrameRate
+            if self.fps != fps {
+                self.fps = fps
+                if let s = session {
+                    VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ExpectedFrameRate,
+                                         value: fps as CFTypeRef)
+                }
+            }
+            return
         }
-        teardown()
+
+        // profile 切换必须重建 session（High ↔ Main）
+        if self.session != nil && self.quality != quality {
+            teardown()
+        } else if self.session != nil && (self.width != width || self.height != height) {
+            teardown()
+        } else if forceRecreate {
+            teardown()
+        }
+
         guard width > 0 && height > 0 else { return }
         self.width = width
         self.height = height
+        self.fps = fps
+        self.quality = quality
 
+        // 显式要求硬件编码器（VideoToolbox 在支持时自动选择，但显式声明可避免某些设备走软编）。
+        // 不指定 RequiredEncoderID：硬编码 ID 在不同设备/iOS 版本可能不一致，
+        // 让 VideoToolbox 自行挑选硬件编码器更稳健；不可用时下方会回退到默认 spec。
+        let encoderSpec: [CFString: Any] = [
+            kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: true,
+        ]
         var session: VTCompressionSession?
-        // outputCallback 传 nil，使用 VTCompressionSessionEncodeFrame 的 outputHandler
-        // （Swift 友好的闭包回调，避免 C 函数指针 + Unmanaged 转换的样板代码）。
         let status = VTCompressionSessionCreate(
             allocator: kCFAllocatorDefault,
             width: Int32(width),
             height: Int32(height),
             codecType: kCMVideoCodecType_H264,
-            encoderSpecification: nil,
+            encoderSpecification: encoderSpec as CFDictionary,
             imageBufferAttributes: nil,
             compressedDataAllocator: nil,
             outputCallback: nil,
@@ -50,26 +125,63 @@ final class H264Encoder {
             compressionSessionOut: &session
         )
         guard status == noErr, let session = session else {
-            print("H264Encoder: VTCompressionSessionCreate failed status=\(status)")
+            // 硬件编码器不可用时回退到默认（让 VideoToolbox 自行选择，可能走软编）
+            print("H264Encoder: hardware encoder unavailable (\(status)), retry with default")
+            let fallbackStatus = VTCompressionSessionCreate(
+                allocator: kCFAllocatorDefault,
+                width: Int32(width),
+                height: Int32(height),
+                codecType: kCMVideoCodecType_H264,
+                encoderSpecification: nil,
+                imageBufferAttributes: nil,
+                compressedDataAllocator: nil,
+                outputCallback: nil,
+                refcon: nil,
+                compressionSessionOut: &session
+            )
+            guard fallbackStatus == noErr, let session = session else {
+                print("H264Encoder: VTCompressionSessionCreate failed status=\(fallbackStatus)")
+                return
+            }
+            applyProperties(to: session)
+            self.session = session
+            print("H264Encoder: configured \(width)x\(height) @ \(fps)fps quality=\(quality.rawValue) bitrate=\(currentBitrate/1000)kbps (fallback)")
             return
         }
+        applyProperties(to: session)
+        self.session = session
+        print("H264Encoder: configured \(width)x\(height) @ \(fps)fps quality=\(quality.rawValue) bitrate=\(currentBitrate/1000)kbps")
+    }
 
+    /// 应用所有编码属性到 session。configure / 质量切换时调用。
+    private func applyProperties(to session: VTCompressionSession) {
         // 实时低延迟配置
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue as CFTypeRef)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime,
+                             value: kCFBooleanTrue as CFTypeRef)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel,
-                             value: kVTProfileLevel_H264_Main_AutoLevel as CFTypeRef)
+                             value: quality.profileLevel as CFTypeRef)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering,
                              value: kCFBooleanFalse as CFTypeRef)
+        // 关闭 OpenGOP：每个关键帧都是 IDR，断线重连后可立即重同步（不依赖前向参考）
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowOpenGOP,
+                             value: kCFBooleanFalse as CFTypeRef)
+        // 熵编码：CABAC 比 CAVLC 节省 5-10% 码率（High/Main profile 支持，Baseline 不支持）
+        // low 质量仍用 CAVLC 兼容 Baseline-ish 设备，medium/high 用 CABAC
+        if quality != .low {
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_H264EntropyMode,
+                                 value: kVTH264EntropyMode_CABAC as CFTypeRef)
+        }
         // GOP：60 帧（@60fps = 1 秒），关键帧间隔过短会爆码率，过长断线重连慢
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
-                             value: 60 as CFTypeRef)
+                             value: gopSize as CFTypeRef)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration,
                              value: 1.0 as CFTypeRef)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate,
                              value: fps as CFTypeRef)
-        // 码率：1080p60 实时一般 6-10 Mbps，按分辨率面积线性缩放
-        let pixels = Double(width * height)
-        let bitrate = max(1_000_000, Int(pixels / 2073600.0 * 8_000_000))
+        // 码率计算：bits-per-pixel 模型，按分辨率面积 × fps × bpp 系数
+        // 1080p60 medium = 1920*1080*60*0.10 ≈ 12.4 Mbps
+        let bitrate = computeBitrate(quality: quality, width: width, height: height, fps: fps)
+        currentBitrate = bitrate
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate,
                              value: bitrate as CFTypeRef)
         // 码率上限：1.5x 平均码率（字节/秒），避免突发导致延迟尖峰
@@ -77,24 +189,71 @@ final class H264Encoder {
         let limitArray = [bitrate, limitBytesPerSecond] as CFArray
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits,
                              value: limitArray as CFTypeRef)
-
-        self.session = session
-        print("H264Encoder: configured \(width)x\(height) @ \(fps)fps bitrate=\(bitrate/1000)kbps")
+        // 电池优先：选择更省电的编码路径（不影响实时性）
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaximizePowerEfficiency,
+                             value: kCFBooleanTrue as CFTypeRef)
+        // 准备就绪（部分属性在 PrepareToEncodeFrames 后才完全生效）
+        VTCompressionSessionPrepareToEncodeFrames(session)
     }
 
+    /// 计算 bpp 模型码率，单位 bps。
+    private func computeBitrate(quality: H264Quality, width: Int, height: Int, fps: Int) -> Int {
+        let pixels = Double(width * height)
+        let raw = pixels * Double(fps) * quality.bpp
+        // 钳制：最低 1 Mbps（避免极低分辨率画质崩坏），最高 25 Mbps（避免 Wi-Fi 5 拥塞）
+        return Int(max(1_000_000, min(raw, 25_000_000)))
+    }
+
+    /// 动态调整码率（无需重建 session）。
+    /// 用于带宽自适应：当网络拥塞时下调，空闲时回升。
+    func setBitrate(_ bitrate: Int) {
+        guard let session = session else { return }
+        let clamped = max(500_000, min(bitrate, 30_000_000))
+        guard clamped != currentBitrate else { return }
+        currentBitrate = clamped
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate,
+                             value: clamped as CFTypeRef)
+        // DataRateLimits 同步调整，保持 1.5x 上限
+        let limitBytesPerSecond = Int(Double(clamped) * 1.5 / 8.0)
+        let limitArray = [clamped, limitBytesPerSecond] as CFArray
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits,
+                             value: limitArray as CFTypeRef)
+    }
+
+    /// 返回当前质量预设下的目标码率，自适应回升时不要超过此值。
+    func targetBitrate() -> Int {
+        return computeBitrate(quality: quality, width: width, height: height, fps: fps)
+    }
+
+    /// 下一帧强制输出 IDR 关键帧。
+    /// 用于：流切换、客户端（重）连、解码器重置后、分辨率突变。
+    func forceKeyframe() {
+        pendingForceKeyframe = true
+    }
+
+    private var pendingForceKeyframe = false
+
     /// 编码一帧。pixelBuffer 通常来自 AVCaptureVideoDataOutput，格式 BGRA。
-    /// 注：首帧默认输出 IDR（VTCompressionSession 行为），无需手动强制关键帧。
     func encode(_ pixelBuffer: CVPixelBuffer) {
         guard let session = session else { return }
-        // PTS 用 CACurrentMediaTime 毫秒级单调递增；实时流不依赖 DTS/PTS 严格顺序，
-        // 编码器只需时间戳做码率控制与 GOP 时长计算。
         let pts = CMTime(value: CMTimeValue(CACurrentMediaTime() * 1000), timescale: 1000)
+
+        // 强制关键帧：通过 frameProperties 传入 VTEncodeFrameOptionKey_ForceKeyFrame
+        var frameProps: CFDictionary?
+        if pendingForceKeyframe {
+            let dict: [CFString: Any] = [
+                VTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue as Any
+            ]
+            frameProps = dict as CFDictionary
+            pendingForceKeyframe = false
+        }
+
         let status = VTCompressionSessionEncodeFrame(
             session,
             imageBuffer: pixelBuffer,
             presentationTimeStamp: pts,
             duration: CMTime.invalid,
-            frameProperties: nil,
+            frameProperties: frameProps,
             infoFlagsOut: nil,
             outputHandler: { [weak self] _, _, sampleBuffer in
                 guard let sampleBuffer = sampleBuffer else { return }
@@ -115,6 +274,8 @@ final class H264Encoder {
         }
         width = 0
         height = 0
+        currentBitrate = 0
+        pendingForceKeyframe = false
     }
 
     deinit {
@@ -124,11 +285,9 @@ final class H264Encoder {
     // MARK: - 内部
 
     /// VTCompressionSession 输出回调（在 videoQueue 上）。
-    /// sampleBuffer 包含一个 Access Unit（一个或多个 NAL，4 字节长度前缀 AVCC 格式）。
     private func handleEncoded(_ sampleBuffer: CMSampleBuffer) {
         guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
         let isKeyframe: Bool = {
-            // kCMSampleAttachmentKey_NotSync=true 表示非关键帧（P/B 帧）
             if let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[CFString: Any]],
                attachments.count > 0 {
                 let notSync = attachments[0][kCMSampleAttachmentKey_NotSync] as? Bool ?? false
@@ -140,7 +299,6 @@ final class H264Encoder {
         var annexB = Data()
         // 关键帧前输出 SPS/PPS（让接收端无需依赖前置参数集）
         if isKeyframe {
-            // 先用 index=0 探测参数集总数
             var totalCount: Int = 0
             var probePtr: UnsafePointer<UInt8>?
             var probeSize: Int = 0
@@ -153,12 +311,10 @@ final class H264Encoder {
                 parameterSetCountOut: &totalCount,
                 nalUnitHeaderLengthOut: &probeNalLen)
             guard probeStatus == noErr else {
-                // 无参数集，直接走 NAL 提取
                 extractNALs(from: sampleBuffer, into: &annexB)
                 if !annexB.isEmpty { onFrame?(annexB, isKeyframe) }
                 return
             }
-            // 遍历所有参数集（典型 H.264 有 SPS+PPS 共 2 个）
             for i in 0..<totalCount {
                 var ptr: UnsafePointer<UInt8>?
                 var size: Int = 0

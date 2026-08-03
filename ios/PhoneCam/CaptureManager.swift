@@ -42,7 +42,7 @@ enum VideoCodec: String, CaseIterable, Identifiable {
     var id: Self { self }
     var label: String {
         switch self {
-        case .h264: return "H.264 硬件编码 (1080p60 推荐)"
+        case .h264: return "H.264 硬件编码 (推荐)"
         case .jpeg: return "JPEG 85"
         case .bgra: return "BGRA 无压缩"
         }
@@ -65,6 +65,18 @@ class CaptureManager: NSObject, ObservableObject {
     @Published var videoCodec: VideoCodec = .h264 {
         didSet { Task { await reconfigureEncoder() } }
     }
+    /// H.264 编码质量预设（仅 H.264 编码方式生效）。
+    /// 切换会重建 VTCompressionSession（profile 变化），下一帧强制 IDR。
+    @Published var h264Quality: H264Quality = .medium {
+        didSet { Task { await reconfigureEncoder() } }
+    }
+    /// 自适应码率开关：根据背压等级 + 热状态自动调整码率。
+    /// 关闭时使用质量预设的固定目标码率。
+    @Published var adaptiveBitrateEnabled: Bool = true {
+        didSet { Task { await _applyAdaptiveState() } }
+    }
+    /// 当前实时码率（kbps），UI 显示用。自适应开启时随网络/热状态变化。
+    @Published var currentBitrateKbps: Int = 0
 
     private let captureSession = AVCaptureSession()
     private var videoDeviceInput: AVCaptureDeviceInput?
@@ -80,12 +92,34 @@ class CaptureManager: NSObject, ObservableObject {
     private var h264NeedsKeyframe = true
 
     /// 原画质传输模块，启用后每帧视频采样都会转发（BGRA 无压缩 TCP）
-    var rawStreamServer: RawStreamServer?
+    var rawStreamServer: RawStreamServer? {
+        didSet {
+            // 重新绑定背压/连接回调（每次设置 server 都要刷新）
+            _wireRawStreamCallbacks()
+        }
+    }
     /// UDP 音频传输模块，启用后每帧音频采样都会转发（PCM 无压缩 UDP）
     var audioStreamServer: AudioStreamServer?
 
+    // MARK: 自适应码率内部状态
+    /// 上一次背压等级，用于避免重复打印日志
+    private var lastBackpressureLevel: BackpressureLevel = .idle
+    /// 自适应码率下当前应用的码率乘数（0.3 ~ 1.0）
+    private var adaptiveBitrateFactor: Double = 1.0
+    /// 热状态：用于过热时自动降码率/降帧
+    private var lastThermalState: ProcessInfo.ThermalState = ProcessInfo.processInfo.thermalState
+    /// 最近一次应用到编码器的码率（bps）。processVideoFrameAsH264 据此避免重复 setBitrate。
+    private var lastAppliedBitrate: Int = 0
+
     override init() {
         super.init()
+        // 监听热状态变化：过热时自动降低码率/帧率，避免硬件降频导致卡顿
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(_thermalStateChanged),
+            name: ProcessInfo.thermalStateDidChangeNotification,
+            object: nil
+        )
     }
 
     deinit {
@@ -300,6 +334,13 @@ class CaptureManager: NSObject, ObservableObject {
         // 释放 H.264 编码器；下次 startCapture 后会按新尺寸重新配置
         h264Encoder.teardown()
         h264NeedsKeyframe = true
+        // 重置自适应码率状态：下次起流时按质量预设重新初始化
+        lastAppliedBitrate = 0
+        adaptiveBitrateFactor = 1.0
+        lastBackpressureLevel = .idle
+        Task { @MainActor in
+            self.currentBitrateKbps = 0
+        }
     }
 
     private func requestAuthorization() async -> Bool {
@@ -428,8 +469,18 @@ extension CaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptur
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
 
-        // 懒配置：首次或尺寸/fps 变化时（re）创建 VTCompressionSession
-        h264Encoder.configure(width: width, height: height, fps: fps)
+        // 懒配置：首次或尺寸/fps/质量变化时（re）创建 VTCompressionSession
+        h264Encoder.configure(width: width, height: height, fps: fps, quality: h264Quality)
+
+        // 应用当前自适应码率：
+        // - 首帧（lastAppliedBitrate==0）→ 调用 _recomputeAdaptiveBitrate 初始化
+        // - 后续帧：编码器刚被 configure 重置过 currentBitrate → 重新应用 lastAppliedBitrate
+        //   稳态下 lastAppliedBitrate == currentBitrate，setBitrate 内部 no-op
+        if lastAppliedBitrate == 0 {
+            _recomputeAdaptiveBitrate()
+        } else if lastAppliedBitrate != h264Encoder.currentBitrate {
+            h264Encoder.setBitrate(lastAppliedBitrate)
+        }
 
         // 设置编码输出回调（每次都设，确保 rawStreamServer 引用最新）
         h264Encoder.onFrame = { [weak self] data, isKeyframe in
@@ -437,13 +488,19 @@ extension CaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptur
                                                      isKeyframe: isKeyframe)
         }
 
+        // 起流首帧/客户端重连/解码器重置 → 强制 IDR
+        if h264NeedsKeyframe {
+            h264Encoder.forceKeyframe()
+            h264NeedsKeyframe = false
+        }
+
         h264Encoder.encode(pixelBuffer)
     }
 }
 
 extension CaptureManager {
-    /// 编码方式切换时的处理：H.264 编码器需重新配置（下次 processVideoFrameAsH264 触发），
-    /// 切换到 H.264 时强制下一帧为 IDR。
+    /// 编码方式/质量切换时的处理：H.264 编码器需重新配置（下次 processVideoFrameAsH264 触发），
+    /// 切换到 H.264 或切换质量预设时强制下一帧为 IDR。
     private func reconfigureEncoder() async {
         if videoCodec == .h264 {
             h264NeedsKeyframe = true
@@ -451,12 +508,108 @@ extension CaptureManager {
             let w = Int(actualCaptureSize.width)
             let h = Int(actualCaptureSize.height)
             if w > 0 && h > 0 {
-                h264Encoder.configure(width: w, height: h, fps: fps)
+                // forceRecreate=true：质量切换会改 profile（Main ↔ High），必须重建 session
+                h264Encoder.configure(width: w, height: h, fps: fps,
+                                      quality: h264Quality, forceRecreate: true)
+                // 配置完成后立即应用当前自适应码率
+                _recomputeAdaptiveBitrate()
             }
         } else {
             // 切换离开 H.264：释放编码器资源
             h264Encoder.teardown()
             h264NeedsKeyframe = true
+        }
+    }
+
+    // MARK: - 自适应码率 / 设备性能适配
+
+    /// 绑定 RawStreamServer 的背压/连接回调。
+    /// 每次 rawStreamServer 被赋值时调用。
+    private func _wireRawStreamCallbacks() {
+        guard let server = rawStreamServer else { return }
+        server.onBackpressure = { [weak self] level in
+            self?._onBackpressure(level)
+        }
+        server.onClientConnected = { [weak self] in
+            // 新客户端接入：强制下一帧 IDR，让接收端解码器立即同步
+            self?.h264NeedsKeyframe = true
+            print("CaptureManager: client (re)connected, force IDR on next frame")
+        }
+    }
+
+    /// 背压等级变化回调（在 RawStreamServer.queue 上调用）。
+    /// 根据 pending 帧数动态调整码率乘数：
+    /// - idle/light: 满码率
+    /// - medium: 0.7x（开始拥堵，预防性下调）
+    /// - heavy: 0.4x（已丢帧，快速降码率避免雪崩）
+    private func _onBackpressure(_ level: BackpressureLevel) {
+        guard adaptiveBitrateEnabled else { return }
+        if level == lastBackpressureLevel { return }
+        lastBackpressureLevel = level
+        switch level {
+        case .idle, .light:
+            adaptiveBitrateFactor = 1.0
+        case .medium:
+            adaptiveBitrateFactor = 0.7
+        case .heavy:
+            adaptiveBitrateFactor = 0.4
+        }
+        print("CaptureManager: backpressure=\(level.rawValue), bitrate factor=\(adaptiveBitrateFactor)")
+        _recomputeAdaptiveBitrate()
+    }
+
+    /// 热状态变化回调。过热时下调码率乘数，避免硬件降频导致卡顿。
+    /// - nominal/fair: 1.0x
+    /// - serious: 0.7x
+    /// - critical: 0.5x
+    @objc private func _thermalStateChanged() {
+        let state = ProcessInfo.processInfo.thermalState
+        guard state != lastThermalState else { return }
+        lastThermalState = state
+        let factor: Double
+        switch state {
+        case .nominal, .fair:
+            factor = 1.0
+        case .serious:
+            factor = 0.7
+        case .critical:
+            factor = 0.5
+        @unknown default:
+            factor = 1.0
+        }
+        print("CaptureManager: thermalState=\(state.rawValue), thermal factor=\(factor)")
+        // 热状态调整不直接覆盖自适应码率，而是通过 _recomputeAdaptiveBitrate 取两者较小值
+        _recomputeAdaptiveBitrate()
+    }
+
+    /// 自适应开关变化时调用：关闭 → 立即恢复到目标码率；开启 → 重新计算。
+    private func _applyAdaptiveState() async {
+        _recomputeAdaptiveBitrate()
+    }
+
+    /// 重新计算并应用当前码率。
+    /// 取"背压因子"与"热状态因子"的较小值，避免单一因素过激调整。
+    /// 仅当码率实际变化时才更新 UI（避免每帧 Task 抖动）。
+    private func _recomputeAdaptiveBitrate() {
+        let thermalFactor: Double
+        switch lastThermalState {
+        case .nominal, .fair: thermalFactor = 1.0
+        case .serious: thermalFactor = 0.7
+        case .critical: thermalFactor = 0.5
+        @unknown default: thermalFactor = 1.0
+        }
+        let effectiveFactor = adaptiveBitrateEnabled
+            ? min(adaptiveBitrateFactor, thermalFactor)
+            : thermalFactor
+        let targetBps = h264Encoder.targetBitrate()
+        let appliedBps = Int(Double(targetBps) * effectiveFactor)
+        let uiChanged = (appliedBps / 1000) != currentBitrateKbps
+        lastAppliedBitrate = appliedBps
+        h264Encoder.setBitrate(appliedBps)
+        if uiChanged {
+            Task { @MainActor in
+                self.currentBitrateKbps = appliedBps / 1000
+            }
         }
     }
 }

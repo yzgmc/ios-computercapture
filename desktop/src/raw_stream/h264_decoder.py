@@ -3,6 +3,11 @@
 每帧接收一个 Access Unit（关键帧含 SPS/PPS+IDR，P 帧仅含 P-slice），
 decode() 返回 RGB24 ndarray；解码器内部缓冲，可能某些调用返回 None
 （解码器需要积累足够输入才输出帧），调用方需容忍 None。
+
+v2 优化：
+- 低延迟解码：thread_type=NONE（单线程）+ low_delay=True + flags=low_delay；
+- 容错解码：strict_std_compliance=-1 + err_recognition=0，避免次要错误导致丢帧；
+- 断线重连后 reset()：清空解码器内部缓冲与参考帧，避免花屏。
 """
 import logging
 import threading
@@ -32,10 +37,21 @@ class H264Decoder:
             self._codec = av.CodecContext.create("h264", "r")
             # 低延迟解码配置（属性在不同 PyAV 版本可用性不同，逐项尝试）
             # thread_type="NONE" 单线程降低延迟；low_delay 在部分版本不存在
-            for prop, val in [("thread_type", "NONE"), ("low_delay", True)]:
+            for prop, val in [
+                ("thread_type", "NONE"),
+                ("low_delay", True),
+                # flags 字符串：low_delay 减少缓冲；unaligned 允许非对齐分辨率
+                ("flags", "low_delay+unaligned"),
+                # flags2: faststart 加快首帧输出
+                ("flags2", "+faststart"),
+                # 宽松标准合规：允许非标准流（如 iOS 硬编的某些边角参数）
+                ("strict_std_compliance", -1),
+                # 关闭错误识别：避免次要错误（如 SPS 变化）导致丢帧
+                ("err_recognition", 0),
+            ]:
                 try:
                     setattr(self._codec, prop, val)
-                except (AttributeError, TypeError):
+                except (AttributeError, TypeError, ValueError):
                     pass  # 该版本不支持此属性，跳过
             logger.info("H264Decoder: PyAV h264 decoder initialized (av %s)",
                         getattr(av, "__version__", "unknown"))
@@ -62,10 +78,12 @@ class H264Decoder:
                 packet = av.Packet(payload)
                 frames = self._codec.decode(packet)
             except Exception as e:
+                # 解码错误通常是参数集变化或丢包导致，记录但不中断流
+                # 频繁错误会降低日志级别，避免日志爆炸
                 if self._frame_count == 0:
                     logger.debug("H264Decoder: first packet decode error (may need SPS/PPS): %s", e)
                 else:
-                    logger.warning("H264Decoder: decode error: %s", e)
+                    logger.debug("H264Decoder: decode error (will recover on next keyframe): %s", e)
                 return None
 
             if not frames:
@@ -86,11 +104,18 @@ class H264Decoder:
                 return None
 
     def reset(self):
-        """重置解码器（断线重连后调用，清空内部状态）。"""
+        """重置解码器（断线重连后调用，清空内部状态）。
+
+        重建 codec context 以清空：
+        - 内部参考帧缓冲
+        - 参数集缓存（SPS/PPS）
+        - 解码器流水线中的待输出帧
+        这样下一个 IDR 关键帧到达时可立即重新同步，避免花屏。
+        """
         with self._lock:
-            # 重新创建 codec context 以清空解码器状态
             self._init_codec()
             self._frame_count = 0
+            logger.info("H264Decoder: decoder reset (cleared reference frames)")
 
     def close(self):
         with self._lock:

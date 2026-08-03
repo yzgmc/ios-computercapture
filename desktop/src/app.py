@@ -386,6 +386,13 @@ class PhoneCamApp(QObject):
                 )
                 await self.raw_receiver.connect_client("127.0.0.1", RAW_STREAM_PORT)
                 self._emit_state("info", "USB 视频通道已重连")
+                # 重置 H.264 解码器：清空参考帧与参数集缓存，
+                # 等待 iOS 端的下一帧 IDR（onClientConnected 已触发）重新同步，避免花屏
+                if self._h264_decoder is not None:
+                    try:
+                        self._h264_decoder.reset()
+                    except Exception as e:
+                        logger.warning("H264 decoder reset on reconnect failed: %s", e)
                 return
             except (ConnectionError, OSError):
                 if attempt % 10 == 0:

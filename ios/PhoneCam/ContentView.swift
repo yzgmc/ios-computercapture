@@ -165,6 +165,43 @@ struct ContentView: View {
                 .pickerStyle(.menu)
                 .disabled(isSharing)
             }
+
+            // H.264 专属参数：质量预设 + 自适应码率（仅 H.264 编码时显示）
+            if captureManager.videoCodec == .h264 {
+                Divider()
+                HStack {
+                    Text("画质预设")
+                        .font(.subheadline)
+                        .foregroundStyle(Color.secondaryText)
+                    Spacer()
+                    Picker("画质", selection: $captureManager.h264Quality) {
+                        ForEach(H264Quality.allCases, id: \.self) { q in
+                            Text(q.label).tag(q)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .disabled(isSharing)
+                }
+
+                HStack {
+                    Toggle("自适应码率", isOn: $captureManager.adaptiveBitrateEnabled)
+                        .toggleStyle(.switch)
+                        .tint(Color.accentBlue)
+                    Spacer()
+                    if captureManager.adaptiveBitrateEnabled {
+                        Text("\(captureManager.currentBitrateKbps / 1000) Mbps")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(Color.secondaryText)
+                    } else {
+                        Text("固定码率")
+                            .font(.caption)
+                            .foregroundStyle(Color.secondaryText)
+                    }
+                }
+                Text("自适应码率：根据网络背压与设备热状态自动调整码率，避免卡顿。")
+                    .font(.caption)
+                    .foregroundStyle(Color.secondaryText)
+            }
         }
         .padding()
         .background(Color.cardBackground)
