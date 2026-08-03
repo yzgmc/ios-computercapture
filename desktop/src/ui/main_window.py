@@ -21,6 +21,8 @@ class MainWindow(QMainWindow):
     virtual_audio_toggled = pyqtSignal(bool)
     flip_changed = pyqtSignal(bool, bool)
     volume_changed = pyqtSignal(float)
+    usb_mode_requested = pyqtSignal()  # 请求切换到 USB 模式
+    lan_mode_requested = pyqtSignal()  # 请求切换到 LAN 模式
 
     def __init__(self):
         super().__init__()
@@ -35,10 +37,17 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
 
-        # 顶部：监听端口信息
-        info_group = QGroupBox("监听端口")
+        # 顶部：传输模式 + 监听端口信息
+        info_group = QGroupBox("连接方式")
         info_layout = QHBoxLayout(info_group)
-        info_layout.addWidget(QLabel("桌面监听地址："))
+        info_layout.addWidget(QLabel("模式："))
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(["局域网 (LAN)", "USB 直连 (USB)"])
+        info_layout.addWidget(self.mode_combo)
+        self.usb_status_label = QLabel("未连接")
+        self.usb_status_label.setStyleSheet("color: #888;")
+        info_layout.addWidget(self.usb_status_label, stretch=1)
+        info_layout.addWidget(QLabel("监听："))
         self.server_input = QLineEdit("TCP :5000 / UDP :5001")
         self.server_input.setReadOnly(True)
         info_layout.addWidget(self.server_input, stretch=1)
@@ -149,3 +158,39 @@ class MainWindow(QMainWindow):
             # 不在预设列表里，临时插入
             self.resolution_combo.insertItem(0, text)
             self.resolution_combo.setCurrentIndex(0)
+
+    def _on_mode_combo_changed(self, idx: int):
+        if idx == 1:
+            self.usb_mode_requested.emit()
+        else:
+            self.lan_mode_requested.emit()
+
+    def set_usb_devices(self, devices: list, current_mode: str):
+        """更新 USB 设备状态显示。"""
+        if current_mode != "usb":
+            self.mode_combo.blockSignals(True)
+            self.mode_combo.setCurrentIndex(0)
+            self.mode_combo.blockSignals(False)
+            self.usb_status_label.setText("未启用")
+            self.usb_status_label.setStyleSheet("color: #888;")
+            return
+        # USB 模式
+        self.mode_combo.blockSignals(True)
+        self.mode_combo.setCurrentIndex(1)
+        self.mode_combo.blockSignals(False)
+        if not devices:
+            self.usb_status_label.setText("⚠ 等待 iPhone USB 连接...")
+            self.usb_status_label.setStyleSheet("color: #ff8800;")
+        else:
+            names = [f"{d['udid'][:8]}..." for d in devices]
+            bridge_ok = any("tcp" in d.get("bridges", []) for d in devices)
+            if bridge_ok:
+                self.usb_status_label.setText(
+                    f"✓ 已连接: {' / '.join(names)}"
+                )
+                self.usb_status_label.setStyleSheet("color: #00cc66;")
+            else:
+                self.usb_status_label.setText(
+                    f"⏳ 桥接中: {' / '.join(names)}"
+                )
+                self.usb_status_label.setStyleSheet("color: #ffaa00;")

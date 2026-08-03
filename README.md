@@ -1,14 +1,18 @@
 # iPhone Camera & Microphone Sharing
 
-将 iPhone 的摄像头和麦克风通过 Wi-Fi 共享给 Windows/macOS 电脑使用，使其他电脑应用（如 Zoom、OBS、Teams）能够识别 iPhone 作为本地摄像头和麦克风。
+将 iPhone 的摄像头和麦克风通过 **Wi-Fi 或 USB** 共享给 Windows/macOS/Linux 电脑使用，
+使其他电脑应用（如 Zoom、OBS、Teams）能够识别 iPhone 作为本地摄像头和麦克风。
 
 ## 功能特性
 
+- **两种传输模式**:
+  - **LAN 模式**: iPhone 通过 Wi-Fi 连接，自动发现桌面端 IP
+  - **USB 直连模式**: 通过 usbmuxd 协议走 USB 物理通道，零配置、低延迟
 - **原画质视频传输**: iPhone 捕获 BGRA 无压缩像素帧，通过 TCP 整帧传输到电脑
 - **无压缩音频传输**: iPhone 捕获 PCM 16-bit 麦克风数据，通过 UDP 实时传输
 - **虚拟摄像头输出**: 电脑端将视频输出到 OBS Virtual Camera / UnityCapture
 - **虚拟麦克风输出**: 电脑端将音频输出到 VB-Cable / BlackHole 等虚拟音频设备
-- **跨平台支持**: 电脑端支持 Windows 和 macOS
+- **跨平台支持**: 电脑端支持 Windows / macOS / Linux
 
 ## 项目结构
 
@@ -17,12 +21,13 @@ ios-computercapture/
 ├── desktop/          # Python + PyQt6 电脑端应用
 │   ├── src/
 │   │   ├── main.py               # 程序入口
-│   │   ├── app.py                # 应用主控制器
-│   │   ├── ui/main_window.py     # PyQt6 主界面
+│   │   ├── app.py                # 应用主控制器（含模式切换）
+│   │   ├── ui/main_window.py     # PyQt6 主界面（LAN/USB 模式切换 UI）
 │   │   ├── raw_stream/           # TCP 视频接收（28B 帧头 + BGRA payload）
 │   │   ├── audio_stream/         # UDP 音频接收 + PyAudio 播放
 │   │   ├── capture/              # 虚拟摄像头输出 + 虚拟音频设备查找
-│   │   └── usb/                  # USB 设备检测（未来扩展）
+│   │   ├── discovery/            # LAN 自动发现（UDP 广播）
+│   │   └── usb/                  # USB 设备检测 + usbmuxd 桥接（直连）
 │   ├── requirements.txt
 │   └── build.py                  # PyInstaller 打包脚本
 ├── ios/              # Swift iOS 应用

@@ -13,11 +13,19 @@ from capture.virtual_device import (
 from raw_stream import RawStreamReceiver, PixelFormat
 from audio_stream import AudioStreamReceiver, AudioPlayer
 from discovery import DiscoveryService
+from usb import (
+    UsbBridgeManager, is_usb_available, list_ios_devices,
+    USB_DEFAULT_TCP_PORT, USB_DEFAULT_UDP_PORT,
+)
 
 logger = logging.getLogger(__name__)
 
 RAW_STREAM_PORT = 5000   # TCP 视频原画质
 AUDIO_STREAM_PORT = 5001  # UDP 音频
+
+# 传输模式
+MODE_LAN = "lan"          # 通过 Wi-Fi / 局域网 TCP/UDP
+MODE_USB = "usb"          # 通过 USB + usbmuxd 桥接
 
 
 class PhoneCamApp(QObject):
@@ -31,6 +39,8 @@ class PhoneCamApp(QObject):
         self.window.virtual_audio_toggled.connect(self._on_virtual_audio_toggled)
         self.window.flip_changed.connect(self._on_flip_changed)
         self.window.volume_changed.connect(self._on_volume_changed)
+        self.window.usb_mode_requested.connect(self.enable_usb_mode)
+        self.window.lan_mode_requested.connect(self.enable_lan_mode)
 
         self.status_changed.connect(self.window.set_status)
 
@@ -55,6 +65,32 @@ class PhoneCamApp(QObject):
         )
 
         self.raw_frame_received.connect(self._display_raw_frame)
+
+        # USB 直连管理器（pymobiledevice3 + usbmuxd）
+        self.usb_manager: UsbBridgeManager | None = None
+        self.usb_devices: list[dict] = []
+        self._mode = MODE_LAN  # 当前传输模式
+        # 接收器 listen 在 127.0.0.1 时只接受 USB 桥接过来的连接，
+        # 在 0.0.0.0 时同时接受 LAN / USB。默认 LAN 全接受。
+        self._listen_host = "0.0.0.0"
+
+    @property
+    def mode(self) -> str:
+        return self._mode
+
+    def _emit_state(self, level: str, msg: str):
+        prefix = {"info": "[USB] ", "warn": "[USB] ⚠ ", "error": "[USB] ✗ "}.get(level, "[USB] ")
+        self.status_changed.emit(prefix + msg)
+        logger.log({"info": logging.INFO, "warn": logging.WARNING,
+                    "error": logging.ERROR, "debug": logging.DEBUG}.get(level, logging.INFO),
+                   "USB: %s", msg)
+
+    def _emit_devices(self):
+        if hasattr(self.window, "set_usb_devices"):
+            try:
+                self.window.set_usb_devices(self.usb_devices, self._mode)
+            except Exception as e:
+                logger.debug("set_usb_devices error: %s", e)
 
     def _on_raw_frame(self, raw: bytes, width: int, height: int,
                       pixel_format: int, bytes_per_row: int):
@@ -160,6 +196,81 @@ class PhoneCamApp(QObject):
             logger.error("Failed to start audio stream receiver: %s", e)
             self.status_changed.emit(f"音频端口 {AUDIO_STREAM_PORT} 启动失败: {e}")
 
+    @asyncSlot()
+    async def enable_usb_mode(self):
+        """用户点击"切换到 USB 模式"：建桥接，等待 iPhone USB 接入。"""
+        if self._mode == MODE_USB:
+            return
+        if not is_usb_available():
+            self.status_changed.emit("USB 直连不可用：未安装 pymobiledevice3")
+            return
+        self._mode = MODE_USB
+        self._emit_state("info", "切换到 USB 直连模式")
+        if self.usb_manager is None:
+            self.usb_manager = UsbBridgeManager(
+                tcp_port=RAW_STREAM_PORT,
+                udp_port=AUDIO_STREAM_PORT,
+                on_state=lambda lvl, msg: self._emit_state(lvl, msg),
+                on_devices_changed=self._on_usb_devices_changed,
+            )
+        # 启动时自动选第一台设备
+        await self.usb_manager.start()
+        # 立即尝试获取已接入设备
+        devs = await list_ios_devices()
+        if devs:
+            await self.usb_manager._ensure_bridges(devs[0]["udid"])
+        # 关闭 LAN 监听（接收器只接受 127.0.0.1 桥接）
+        await self._restart_receivers(listen_host="127.0.0.1")
+        self._emit_state("info", "等待 iPhone 通过 USB 连接...")
+        self._emit_devices()
+
+    @asyncSlot()
+    async def enable_lan_mode(self):
+        """用户切换回 LAN 模式：恢复 0.0.0.0 监听 + 关闭 USB 桥接。"""
+        if self._mode == MODE_LAN:
+            return
+        self._mode = MODE_LAN
+        self._emit_state("info", "切换到局域网模式")
+        if self.usb_manager:
+            await self.usb_manager.stop()
+        await self._restart_receivers(listen_host="0.0.0.0")
+        self._emit_devices()
+
+    async def _restart_receivers(self, listen_host: str):
+        """重启接收器，绑定到 listen_host。"""
+        try:
+            await self.raw_receiver.stop()
+        except Exception:
+            pass
+        try:
+            await self.audio_receiver.stop()
+        except Exception:
+            pass
+        self.raw_receiver = RawStreamReceiver(
+            host=listen_host, port=RAW_STREAM_PORT, on_frame=self._on_raw_frame
+        )
+        self.audio_receiver = AudioStreamReceiver(
+            host=listen_host, port=AUDIO_STREAM_PORT, on_packet=self._on_audio_packet
+        )
+        try:
+            await self.raw_receiver.start()
+        except Exception as e:
+            self._emit_state("error", f"重启 TCP 接收器失败: {e}")
+        try:
+            await self.audio_receiver.start()
+        except Exception as e:
+            self._emit_state("error", f"重启 UDP 接收器失败: {e}")
+        self._listen_host = listen_host
+
+    async def _on_usb_devices_changed(self, devices: list):
+        self.usb_devices = devices
+        self._emit_devices()
+        for d in devices:
+            if d.get("bridges") and "tcp" in d["bridges"]:
+                self._emit_state("info", f"设备就绪: {d['udid'][:8]}...")
+            else:
+                self._emit_state("info", f"设备断开: {d['udid'][:8]}...")
+
     def show(self):
         self.window.show()
 
@@ -191,6 +302,11 @@ class PhoneCamApp(QObject):
 
     async def shutdown(self):
         """应用退出时清理所有资源。"""
+        if self.usb_manager:
+            try:
+                await self.usb_manager.stop()
+            except Exception as e:
+                logger.warning("USB manager stop error: %s", e)
         try:
             await self.raw_receiver.stop()
         except Exception as e:

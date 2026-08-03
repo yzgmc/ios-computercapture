@@ -14,9 +14,11 @@ struct ContentView: View {
     @StateObject private var captureManager = CaptureManager()
 
     @State private var isSharing = false
-    // 原画质传输（无压缩 TCP，局域网适用）
+    // 传输模式：lan / usb
+    @State private var transportMode = "lan"
+    // 原画质传输（无压缩 TCP）
     @State private var rawStreamEnabled = true
-    @State private var rawStreamHost = "192.168.1.100"
+    @State private var rawStreamHost = "192.168.1.100"  // USB 模式时此值忽略
     @State private var rawStreamPort = "5000"
     @State private var isDiscovering = false
     private let rawStreamServer = RawStreamServer()
@@ -176,16 +178,49 @@ struct ContentView: View {
 
             if rawStreamEnabled {
                 Divider()
+                // 传输模式选择：局域网 / USB 直连
+                Picker("传输模式", selection: $transportMode) {
+                    Text("局域网").tag("lan")
+                    Text("USB 直连").tag("usb")
+                }
+                .pickerStyle(.segmented)
+                .disabled(isSharing)
+
+                if transportMode == "usb" {
+                    HStack(spacing: 6) {
+                        Image(systemName: "cable.connector")
+                            .foregroundStyle(.secondary)
+                        Text("USB 模式：iPhone 通过 USB 共享通道连接电脑，桌面端自动桥接。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 HStack(spacing: 12) {
                     Image(systemName: "desktopcomputer")
                         .foregroundStyle(Color.secondaryText)
                         .frame(width: 24)
-                    TextField("桌面 IP", text: $rawStreamHost)
+                    TextField(transportMode == "usb" ? "127.0.0.1 (USB)" : "桌面 IP",
+                              text: $rawStreamHost)
                         .textFieldStyle(.roundedBorder)
                         .keyboardType(.decimalPad)
                         .autocapitalization(.none)
                         .disableAutocorrection(true)
-                        .disabled(isSharing)                }
+                        .disabled(isSharing || transportMode == "usb")
+                    if transportMode == "lan" {
+                        Button {
+                            autoDiscover()
+                        } label: {
+                            if isDiscovering {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Image(systemName: "antenna.radiowaves.left.and.right")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(isSharing || isDiscovering)
+                    }
+                }
                 HStack(spacing: 12) {
                     Image(systemName: "dot.radiowaves.left.and.right")
                         .foregroundStyle(Color.secondaryText)
@@ -316,18 +351,22 @@ struct ContentView: View {
     // MARK: - 业务逻辑
     private func connect() {
         Task {
+            // USB 模式：iOS 端通过 usbmuxd 桥接到 desktop 的 127.0.0.1，
+            // 数据流走 USB 物理通道。LAN 模式：iOS 主动连接 desktop 的局域网 IP。
+            let effectiveHost = (transportMode == "usb") ? "127.0.0.1" : rawStreamHost
+
             // 启动 TCP 连接（不等 ready，先发起）
             var tcpReady = false
             var udpReady = false
             if rawStreamEnabled, let port = UInt16(rawStreamPort) {
                 captureManager.rawStreamServer = rawStreamServer
-                rawStreamServer.start(host: rawStreamHost, port: port) { ready in
+                rawStreamServer.start(host: effectiveHost, port: port) { ready in
                     tcpReady = ready
                 }
             }
             if audioStreamEnabled, let port = UInt16(audioStreamPort) {
                 captureManager.audioStreamServer = audioStreamServer
-                audioStreamServer.start(host: rawStreamHost, port: port) { ready in
+                audioStreamServer.start(host: effectiveHost, port: port) { ready in
                     udpReady = ready
                 }
             }
@@ -338,7 +377,11 @@ struct ContentView: View {
             }
             if !tcpReady {
                 await MainActor.run {
-                    statusMessage = "连接桌面端失败，请检查 IP/端口"
+                    if transportMode == "usb" {
+                        statusMessage = "USB 直连失败，请确认桌面端已切换到 USB 模式且 iPhone 已连接 USB"
+                    } else {
+                        statusMessage = "连接桌面端失败，请检查 IP/端口"
+                    }
                 }
                 rawStreamServer.stop()
                 audioStreamServer.stop()
@@ -347,7 +390,8 @@ struct ContentView: View {
             await captureManager.startCapture()
             await MainActor.run {
                 isSharing = true
-                statusMessage = "正在共享 → \(rawStreamHost):\(rawStreamPort)/\(audioStreamPort)"
+                let mode = transportMode == "usb" ? "USB" : rawStreamHost
+                statusMessage = "正在共享 → \(mode):\(rawStreamPort)/\(audioStreamPort)"
             }
         }
     }
