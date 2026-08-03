@@ -39,23 +39,33 @@ final class RawStreamServer {
 
     /// 连接到桌面端 TCP 端口。
     func start(host: String, port: UInt16) {
-        guard !isRunning else { return }
+        guard !isRunning else {
+            print("RawStream: start() ignored, already running")
+            return
+        }
         let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host),
                                             port: NWEndpoint.Port(integerLiteral: port))
         let params = NWParameters.tcp
         let conn = NWConnection(to: endpoint, using: params)
         conn.stateUpdateHandler = { [weak self] state in
             switch state {
+            case .setup:
+                print("RawStream: setup -> \(host):\(port)")
+            case .preparing:
+                print("RawStream: preparing")
             case .ready:
-                print("RawStream TCP connection ready -> \(host):\(port)")
+                print("RawStream: TCP ready -> \(host):\(port)")
                 self?.isRunning = true
+            case .waiting(let err):
+                print("RawStream: waiting (\(err))")
             case .failed(let err):
-                print("RawStream TCP connection failed: \(err)")
+                print("RawStream: failed (\(err))")
                 self?.isRunning = false
             case .cancelled:
+                print("RawStream: cancelled")
                 self?.isRunning = false
-            default:
-                break
+            @unknown default:
+                print("RawStream: unknown state")
             }
         }
         conn.start(queue: queue)
@@ -114,6 +124,9 @@ final class RawStreamServer {
                       count: payloadLength)
 
         send(packet)
+        if currentFrameID % 60 == 0 {
+            print("RawStream: sent frame \(currentFrameID) (\(width)x\(height) payload=\(payloadLength))")
+        }
     }
 
     private func send(_ data: Data) {
