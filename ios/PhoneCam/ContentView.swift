@@ -316,15 +316,33 @@ struct ContentView: View {
     // MARK: - 业务逻辑
     private func connect() {
         Task {
-            // 启用 TCP 原画质视频
+            // 启动 TCP 连接（不等 ready，先发起）
+            var tcpReady = false
+            var udpReady = false
             if rawStreamEnabled, let port = UInt16(rawStreamPort) {
                 captureManager.rawStreamServer = rawStreamServer
-                rawStreamServer.start(host: rawStreamHost, port: port)
+                rawStreamServer.start(host: rawStreamHost, port: port) { ready in
+                    tcpReady = ready
+                }
             }
-            // 启用 UDP 音频
             if audioStreamEnabled, let port = UInt16(audioStreamPort) {
                 captureManager.audioStreamServer = audioStreamServer
-                audioStreamServer.start(host: rawStreamHost, port: port)
+                audioStreamServer.start(host: rawStreamHost, port: port) { ready in
+                    udpReady = ready
+                }
+            }
+            // 等待 TCP 真正 ready（最多 5 秒），再启动 capture
+            let deadline = Date().addingTimeInterval(5.0)
+            while (!tcpReady || (rawStreamEnabled && !udpReady)) && Date() < deadline {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            if !tcpReady {
+                await MainActor.run {
+                    statusMessage = "连接桌面端失败，请检查 IP/端口"
+                }
+                rawStreamServer.stop()
+                audioStreamServer.stop()
+                return
             }
             await captureManager.startCapture()
             await MainActor.run {

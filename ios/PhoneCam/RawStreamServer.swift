@@ -37,16 +37,18 @@ final class RawStreamServer {
     private var frameID: UInt32 = 0
     private(set) var isRunning = false
 
-    /// 连接到桌面端 TCP 端口。
-    func start(host: String, port: UInt16) {
+    /// 连接到桌面端 TCP 端口。onReady 在 NWConnection.state == .ready 时回调。
+    func start(host: String, port: UInt16, onReady: ((Bool) -> Void)? = nil) {
         guard !isRunning else {
             print("RawStream: start() ignored, already running")
+            onReady?(true)
             return
         }
         let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host),
                                             port: NWEndpoint.Port(integerLiteral: port))
         let params = NWParameters.tcp
         let conn = NWConnection(to: endpoint, using: params)
+        var isFirstReady = true
         conn.stateUpdateHandler = { [weak self] state in
             switch state {
             case .setup:
@@ -56,14 +58,21 @@ final class RawStreamServer {
             case .ready:
                 print("RawStream: TCP ready -> \(host):\(port)")
                 self?.isRunning = true
+                if isFirstReady {
+                    isFirstReady = false
+                    onReady?(true)
+                }
             case .waiting(let err):
                 print("RawStream: waiting (\(err))")
+                onReady?(false)
             case .failed(let err):
                 print("RawStream: failed (\(err))")
                 self?.isRunning = false
+                onReady?(false)
             case .cancelled:
                 print("RawStream: cancelled")
                 self?.isRunning = false
+                onReady?(false)
             @unknown default:
                 print("RawStream: unknown state")
             }

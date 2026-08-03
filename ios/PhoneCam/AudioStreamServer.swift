@@ -37,8 +37,8 @@ final class AudioStreamServer {
     private var format: UInt8 = AudioStreamServer.formatPCM16LE
 
     /// 连接到桌面端 UDP 端口（默认 5001）。
-    func start(host: String, port: UInt16) {
-        guard !isRunning else { return }
+    func start(host: String, port: UInt16, onReady: ((Bool) -> Void)? = nil) {
+        guard !isRunning else { onReady?(true); return }
         let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host),
                                             port: NWEndpoint.Port(integerLiteral: port))
         let params = NWParameters.udp
@@ -48,11 +48,14 @@ final class AudioStreamServer {
             case .ready:
                 print("AudioStream UDP connection ready -> \(host):\(port)")
                 self?.isRunning = true
+                onReady?(true)
             case .failed(let err):
                 print("AudioStream UDP connection failed: \(err)")
                 self?.isRunning = false
+                onReady?(false)
             case .cancelled:
                 self?.isRunning = false
+                onReady?(false)
             default:
                 break
             }
