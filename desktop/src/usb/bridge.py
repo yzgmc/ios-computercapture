@@ -102,6 +102,7 @@ class UsbBridge:
         self._task: Optional[asyncio.Task] = None
         self._stop_event = asyncio.Event()
         self._forwarder = None  # 持有 TcpForwarderBase 实例，用于 stop()
+        self._listening_event: Optional[asyncio.Event] = None  # forwarder 端口绑定就绪
         self.state = "idle"  # idle / starting / running / stopped / error
 
     def _set_state(self, s: str):
@@ -152,14 +153,16 @@ class UsbBridge:
         self._set_state("running")
 
         try:
-            # 新版 API：UsbmuxTcpForwarder(serial, dst_port, src_port)
+            # 新版 API：UsbmuxTcpForwarder(serial, dst_port, src_port, listening_event=...)
             # 旧版 API：TcpForwarder(udid, src_port, dst_port)
             # 注意参数顺序不同！
+            listening_event = asyncio.Event()
             if _PM3_FORWARDER_NEW:
                 forwarder = _Pm3TcpForwarder(
                     serial=self.udid,
                     dst_port=self.device_port,
                     src_port=self.host_port,
+                    listening_event=listening_event,
                 )
             else:
                 forwarder = _Pm3TcpForwarder(
@@ -169,6 +172,8 @@ class UsbBridge:
                 )
 
             self._forwarder = forwarder
+            self._listening_event = listening_event
+            self._set_state("running")
             # start() 内部 await self.stopped.wait()，会一直运行直到 stop() 被调用
             await forwarder.start()
         except asyncio.CancelledError:
@@ -180,6 +185,16 @@ class UsbBridge:
 
         if self.state not in ("error", "stopped"):
             self._set_state("stopped")
+
+    async def wait_ready(self, timeout: float = 5.0) -> bool:
+        """等待 forwarder 真正在 PC 端绑定端口（listening_event 被设置）。"""
+        if self._listening_event is None:
+            return True  # 旧版 API 无 listening_event，直接返回 True
+        try:
+            await asyncio.wait_for(self._listening_event.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
 
 
 class UsbBridgeManager:

@@ -264,6 +264,15 @@ class PhoneCamApp(QObject):
         devs = await list_ios_devices()
         if devs:
             await self.usb_manager._ensure_bridges(devs[0]["udid"])
+            # 等待 forwarder 真正绑定端口，避免 connect_client 因端口未就绪而失败
+            for udid, bridges in self.usb_manager._bridges.items():
+                tcp_bridge = bridges.get("tcp")
+                if tcp_bridge and hasattr(tcp_bridge, "wait_ready"):
+                    ready = await tcp_bridge.wait_ready(timeout=5.0)
+                    if ready:
+                        self._emit_state("info", "USB 桥接就绪 (forwarder 已监听)")
+                    else:
+                        self._emit_state("warn", "USB 桥接启动超时，仍尝试连接…")
         # 重启接收器：TCP 用客户端模式连接 forwarder，UDP 仍监听 127.0.0.1
         await self._restart_receivers(listen_host="127.0.0.1", use_tcp_client=True)
         self._emit_state("info", "等待 iPhone 通过 USB 连接...")
@@ -298,7 +307,8 @@ class PhoneCamApp(QObject):
         except Exception:
             pass
         self.raw_receiver = RawStreamReceiver(
-            host=listen_host, port=RAW_STREAM_PORT, on_frame=self._on_raw_frame
+            host=listen_host, port=RAW_STREAM_PORT, on_frame=self._on_raw_frame,
+            on_disconnect=(self._on_usb_disconnect if use_tcp_client else None),
         )
         self.audio_receiver = AudioStreamReceiver(
             host=listen_host, port=AUDIO_STREAM_PORT, on_packet=self._on_audio_packet
@@ -307,17 +317,22 @@ class PhoneCamApp(QObject):
             # USB 模式：作为客户端连接 forwarder（forwarder 已由 UsbBridgeManager 启动）。
             # forwarder 启动是异步的，需重试等待端口就绪。
             connected = False
-            for attempt in range(10):
+            for attempt in range(15):
                 try:
                     await self.raw_receiver.connect_client("127.0.0.1", RAW_STREAM_PORT)
                     connected = True
+                    self._emit_state("info", "USB 视频通道已连接")
                     break
                 except (ConnectionError, OSError) as e:
-                    self._emit_state("info",
-                                     f"等待 USB 桥接就绪… ({attempt + 1}/10)")
+                    if attempt == 0:
+                        self._emit_state("info",
+                                         f"等待 USB 桥接就绪… ({attempt + 1}/15)")
+                    elif attempt % 5 == 4:
+                        self._emit_state("info",
+                                         f"仍在等待 USB 桥接… ({attempt + 1}/15)")
                     await asyncio.sleep(0.5)
             if not connected:
-                self._emit_state("error", "USB 桥接连接失败：forwarder 未就绪")
+                self._emit_state("error", "USB 桥接连接失败：forwarder 未就绪，请确认 iOS 端已启动 USB 模式")
         else:
             try:
                 await self.raw_receiver.start()
@@ -337,6 +352,46 @@ class PhoneCamApp(QObject):
                 self._emit_state("info", f"设备就绪: {d['udid'][:8]}...")
             else:
                 self._emit_state("info", f"设备断开: {d['udid'][:8]}...")
+
+    def _on_usb_disconnect(self):
+        """USB 模式下视频通道断开时触发自动重连（异步）。
+
+        断开原因：iOS 端未启动 / app 进入后台 / USB 线缆松动 / forwarder 重启。
+        重连策略：在后台任务中每 1.5s 尝试 connect_client，最多 40 次（60s）。
+        """
+        if self._mode != MODE_USB:
+            return
+        self._emit_state("warn", "USB 视频通道断开，尝试重连…")
+        if getattr(self, "_usb_reconnect_task", None) and not self._usb_reconnect_task.done():
+            return  # 已有重连任务在跑
+        self._usb_reconnect_task = asyncio.create_task(
+            self._usb_reconnect_loop(), name="usb-reconnect"
+        )
+
+    async def _usb_reconnect_loop(self):
+        """USB 视频通道自动重连循环。"""
+        for attempt in range(40):
+            if self._mode != MODE_USB:
+                return  # 已切换到 LAN 模式
+            try:
+                # 每次重连前重建 receiver（旧的 reader/writer 已关闭）
+                try:
+                    await self.raw_receiver.stop()
+                except Exception:
+                    pass
+                self.raw_receiver = RawStreamReceiver(
+                    host="127.0.0.1", port=RAW_STREAM_PORT,
+                    on_frame=self._on_raw_frame,
+                    on_disconnect=self._on_usb_disconnect,
+                )
+                await self.raw_receiver.connect_client("127.0.0.1", RAW_STREAM_PORT)
+                self._emit_state("info", "USB 视频通道已重连")
+                return
+            except (ConnectionError, OSError):
+                if attempt % 10 == 0:
+                    self._emit_state("info", f"USB 重连中… ({attempt + 1}/40)")
+                await asyncio.sleep(1.5)
+        self._emit_state("error", "USB 视频通道重连失败（已尝试 60s）")
 
     def show(self):
         self.window.show()

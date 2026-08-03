@@ -20,10 +20,12 @@ class RawStreamReceiver:
     """TCP 原画质帧接收器。"""
 
     def __init__(self, host: str = "0.0.0.0", port: int = 5000,
-                 on_frame=None, max_buffered_frames: int = 1):
+                 on_frame=None, max_buffered_frames: int = 1,
+                 on_disconnect=None):
         self.host = host
         self.port = port
         self.on_frame = on_frame
+        self.on_disconnect = on_disconnect  # USB 模式连接断开回调
         self._max_buffered = max_buffered_frames
         self._server: asyncio.AbstractServer | None = None
         # 客户端模式（USB 直连）持有的读写流与后台任务
@@ -169,3 +171,9 @@ class RawStreamReceiver:
             except Exception:
                 pass
             logger.info("RawStream client disconnected: %s", peer)
+            # 通知上层（USB 模式可用于触发重连）
+            if self.on_disconnect:
+                try:
+                    self.on_disconnect()
+                except Exception:
+                    pass

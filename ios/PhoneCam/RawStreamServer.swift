@@ -136,6 +136,11 @@ final class RawStreamServer {
             listener.newConnectionHandler = { [weak self] conn in
                 print("RawStream listener: accepted connection from \(String(describing: conn.endpoint))")
                 // USB 模式只接受一条连接（桌面端唯一客户端）
+                // 重置背压计数：之前无连接时 processFrame 增加的 pending 已被 send() 释放，
+                // 但为防御性，此处强制清零，确保客户端连接后帧能正常流出。
+                self?.pendingLock.lock()
+                self?.pendingFrameCount = 0
+                self?.pendingLock.unlock()
                 self?.connection = conn
                 conn.start(queue: self?.queue ?? .global())
             }
@@ -329,7 +334,13 @@ final class RawStreamServer {
     }
 
     private func send(_ data: Data) {
-        connection?.send(content: data, completion: .contentProcessed { [weak self] error in
+        guard let conn = connection else {
+            // USB 服务器模式：暂无客户端连接，立即释放背压名额，
+            // 避免 pendingFrameCount 卡在 maxPendingFrames 导致后续帧全丢。
+            _decrementPending()
+            return
+        }
+        conn.send(content: data, completion: .contentProcessed { [weak self] error in
             // 发送完成才允许下一帧进入（背压）
             self?._decrementPending()
             if let error = error {
