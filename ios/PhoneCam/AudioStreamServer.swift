@@ -68,11 +68,22 @@ final class AudioStreamServer {
 
         // 1. 从 sample buffer 的 format description 检测实际音频格式
         guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
-        let avFormat = AVAudioFormat(cmAudioFormatDescription: formatDesc)
 
-        let detectedSampleRate: Double = avFormat?.sampleRate ?? 44100
-        let detectedChannels: AVAudioChannelCount = avFormat?.channelCount ?? 1
-        let pcmFormat = avFormat?.pcmFormat ?? .int16
+        // 用 Core Media API 读取 AudioStreamBasicDescription
+        let basicDesc = CMFormatDescriptionGetBasicDescription(formatDesc)
+        let detectedSampleRate = basicDesc.mSampleRate
+        let detectedChannels = basicDesc.mChannelsPerFrame
+        let bitsPerChannel = basicDesc.mBitsPerChannel
+
+        // 推断 PCM 格式：基于 mBitsPerChannel
+        let pcmFormat: AVAudioPCMFormat
+        if bitsPerChannel == 32 {
+            pcmFormat = .int32
+        } else if bitsPerChannel == 16 {
+            pcmFormat = .int16
+        } else {
+            pcmFormat = .int16  // 兜底
+        }
 
         // 2. 提取原始 PCM 字节
         var blockBuffer: CMBlockBuffer?
