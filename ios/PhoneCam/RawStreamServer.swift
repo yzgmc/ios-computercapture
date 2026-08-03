@@ -82,17 +82,47 @@ final class RawStreamServer {
         frameID &+= 1
 
         // 单次 send 合并帧头与 payload，避免两次 send 导致接收方读到的字节流交错
-        var packet = Data(capacity: Self.headerSize + payloadLength)
-        packet.append(contentsOf: Self.magic)
-        packet.append(contentsOf: withUnsafeBytes(of: currentFrameID.bigEndian) { Array($0) })
-        packet.append(contentsOf: withUnsafeBytes(of: UInt32(width).bigEndian) { Array($0) })
-        packet.append(contentsOf: withUnsafeBytes(of: UInt32(height).bigEndian) { Array($0) })
-        packet.append(contentsOf: withUnsafeBytes(of: UInt32(0).bigEndian) { Array($0) }) // format=0 BGRA
-        packet.append(contentsOf: withUnsafeBytes(of: UInt32(bytesPerRow).bigEndian) { Array($0) })
-        packet.append(contentsOf: withUnsafeBytes(of: UInt32(payloadLength).bigEndian) { Array($0) })
+        // 帧头 28B 大端序：magic(4) + frame_id(4) + width(4) + height(4) + format(4) + bytes_per_row(4) + payload_length(4)
+        // 一次性分配并用 memcpy 写入，避免 Data.append 多次扩容
+        var packet = Data(count: Self.headerSize + payloadLength)
+        packet.withUnsafeMutableBytes { raw in
+            guard let p = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
 
-        let chunkData = Data(bytes: baseAddress, count: payloadLength)
-        packet.append(chunkData)
+            // magic (4B)
+            for i in 0..<4 { p[i] = Self.magic[i] }
+            // frame_id (4B, big-endian)
+            var fid = currentFrameID.bigEndian
+            withUnsafeBytes(of: &fid) { fidPtr in
+                for i in 0..<4 { p[4 + i] = fidPtr.load(fromByteOffset: i, as: UInt8.self) }
+            }
+            // width (4B, BE)
+            var w = UInt32(width).bigEndian
+            withUnsafeBytes(of: &w) { ptr in
+                for i in 0..<4 { p[8 + i] = ptr.load(fromByteOffset: i, as: UInt8.self) }
+            }
+            // height (4B, BE)
+            var h = UInt32(height).bigEndian
+            withUnsafeBytes(of: &h) { ptr in
+                for i in 0..<4 { p[12 + i] = ptr.load(fromByteOffset: i, as: UInt8.self) }
+            }
+            // format (4B=0 BGRA, BE)
+            for i in 0..<4 { p[16 + i] = 0 }
+            // bytes_per_row (4B, BE)
+            var bpr = UInt32(bytesPerRow).bigEndian
+            withUnsafeBytes(of: &bpr) { ptr in
+                for i in 0..<4 { p[20 + i] = ptr.load(fromByteOffset: i, as: UInt8.self) }
+            }
+            // payload_length (4B, BE)
+            var plen = UInt32(payloadLength).bigEndian
+            withUnsafeBytes(of: &plen) { ptr in
+                for i in 0..<4 { p[24 + i] = ptr.load(fromByteOffset: i, as: UInt8.self) }
+            }
+
+            // payload: 直接 memcpy 避免 Data 二次拷贝
+            if let src = baseAddress {
+                memcpy(p + Self.headerSize, src, payloadLength)
+            }
+        }
 
         send(packet)
     }
