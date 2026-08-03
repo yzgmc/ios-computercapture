@@ -133,8 +133,10 @@ final class RawStreamServer {
                       count: payloadLength)
 
         send(packet)
-        if currentFrameID % 60 == 0 {
-            print("RawStream: sent frame \(currentFrameID) (\(width)x\(height) payload=\(payloadLength))")
+        // 前 5 帧强制打印（诊断），之后每 60 帧一次
+        if currentFrameID < 5 || currentFrameID % 60 == 0 {
+            let hex = packet.prefix(28).map { String(format: "%02x", $0) }.joined(separator: " ")
+            print("RawStream: sent frame \(currentFrameID) (\(width)x\(height) payload=\(payloadLength)) header=\(hex)")
         }
     }
 
