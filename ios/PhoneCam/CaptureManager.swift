@@ -178,17 +178,7 @@ class CaptureManager: NSObject, ObservableObject {
             }
 
             let audioOutput = AVCaptureAudioDataOutput()
-            // 输出格式：48kHz / 单声道 / 16-bit PCM / 小端 / 交错
-            // 与 AudioStreamServer 中声明的格式必须一致，桌面端据此打开 PyAudio 流
-            audioOutput.audioSettings = [
-                AVFormatIDKey: kAudioFormatLinearPCM,
-                AVSampleRateKey: 48000,
-                AVNumberOfChannelsKey: 1,
-                AVLinearPCMBitDepthKey: 16,
-                AVLinearPCMIsFloatKey: false,
-                AVLinearPCMIsBigEndianKey: false,
-                AVLinearPCMIsNonInterleaved: false
-            ]
+            // iOS 上 audioSettings 不可用（仅 macOS 支持），格式由 AudioStreamServer 动态检测与转换
             audioOutput.setSampleBufferDelegate(self, queue: DispatchQueue(label: "audioQueue"))
             if captureSession.canAddOutput(audioOutput) {
                 captureSession.addOutput(audioOutput)
@@ -338,7 +328,7 @@ extension CaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptur
             // 视频帧转发到原画质 TCP 模块（采集格式已为 BGRA，无需转换）
             rawStreamServer?.processSampleBuffer(sampleBuffer, requiresBGRAConversion: false)
         } else if output is AVCaptureAudioDataOutput {
-            // 音频帧转发到 UDP 模块（audioSettings 已配为 PCM16 48kHz mono）
+            // 音频帧转发到 UDP 模块（AudioStreamServer 动态检测格式并转换为 PCM16LE）
             audioStreamServer?.processSampleBuffer(sampleBuffer)
         }
     }

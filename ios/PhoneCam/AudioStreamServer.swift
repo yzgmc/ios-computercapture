@@ -24,11 +24,10 @@ final class AudioStreamServer {
     private var seq: UInt32 = 0
     private(set) var isRunning = false
 
-    /// 当前 PCM 格式（与 AVCaptureAudioDataOutput.audioSettings 对应）。
-    /// 桌面端据此打开 PyAudio 输出流；格式变化时桌面端会重建流。
-    private let sampleRate: UInt32 = 48000
-    private let channels: UInt8 = 1
-    private let format: UInt8 = AudioStreamServer.formatPCM16LE
+    /// 实际采集参数（由 CMSampleBuffer 动态检测后更新，桌面端据此配置 PyAudio 流）
+    private var sampleRate: UInt32 = 48000
+    private var channels: UInt8 = 1
+    private var format: UInt8 = AudioStreamServer.formatPCM16LE
 
     /// 连接到桌面端 UDP 端口（默认 5001）。
     func start(host: String, port: UInt16) {
@@ -62,11 +61,20 @@ final class AudioStreamServer {
         seq = 0
     }
 
-    /// 处理一帧采集音频：从 CMSampleBuffer 抽取 PCM 字节并分片发送。
-    /// 假设 audioSettings 已配置为 48kHz / mono / 16-bit PCM interleaved。
+    /// 处理一帧采集音频：从 CMSampleBuffer 抽取 PCM 字节、必要时转换格式、分片 UDP 发送。
+    /// iOS 上 AVCaptureAudioDataOutput.audioSettings 不可用，因此格式由 sample buffer 动态检测。
     func processSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
         guard isRunning else { return }
 
+        // 1. 从 sample buffer 的 format description 检测实际音频格式
+        guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
+        let avFormat = AVAudioFormat(from: formatDesc)
+
+        let detectedSampleRate: Double = avFormat?.sampleRate ?? 44100
+        let detectedChannels: AVAudioChannelCount = avFormat?.channelCount ?? 1
+        let pcmFormat = avFormat?.pcmFormat ?? .int16
+
+        // 2. 提取原始 PCM 字节
         var blockBuffer: CMBlockBuffer?
         let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
             sampleBuffer,
@@ -83,14 +91,12 @@ final class AudioStreamServer {
             return
         }
 
-        var totalLength = 0
-        let lengthStatus = CMBlockBufferGetDataLength(bb, totalLengthOut: &totalLength)
-        guard lengthStatus == kCMBlockBufferNoErr, totalLength > 0 else {
-            return
-        }
+        // CMBlockBufferGetDataLength 新版 API 直接返回 Int，不再需要 totalLengthOut 参数
+        let totalLength = CMBlockBufferGetDataLength(bb)
+        guard totalLength > 0 else { return }
 
-        var data = Data(count: totalLength)
-        let readStatus = data.withUnsafeMutableBytes { (ptr: UnsafeMutableRawBufferPointer) -> OSStatus in
+        var rawData = Data(count: totalLength)
+        let readStatus = rawData.withUnsafeMutableBytes { (ptr: UnsafeMutableRawBufferPointer) -> OSStatus in
             guard let base = ptr.baseAddress else { return -1 }
             return CMBlockBufferCopyDataBytes(bb, atOffset: 0, dataLength: totalLength, destination: base)
         }
@@ -99,16 +105,68 @@ final class AudioStreamServer {
             return
         }
 
-        // PCM16 mono 48kHz：每帧 2 字节；MTU 内最多 1456 字节 = 728 采样 ≈ 15ms。
-        // 大块按 maxPayloadBytes 切片发送，每片带独立 seq 便于桌面端诊断丢包。
+        // 3. 格式转换：统一为 PCM16LE，确保桌面端兼容
+        let pcmData: Data
+        let outputFormat: UInt8
+
+        switch pcmFormat {
+        case .int16:
+            // 已是 PCM16，直接使用（但需注意字节序和交错方式）
+            pcmData = rawData
+            outputFormat = Self.formatPCM16LE
+
+        case .int32:
+            // 32-bit PCM → 16-bit
+            pcmData = convertInt32ToInt16(rawData)
+            outputFormat = Self.formatPCM16LE
+
+        case .float:
+            // Float32 → Int16
+            pcmData = convertFloatToInt16(rawData)
+            outputFormat = Self.formatPCM16LE
+
+        @unknown default:
+            print("AudioStream: unsupported PCM format: \(pcmFormat.rawValue)")
+            return
+        }
+
+        // 4. 更新协议字段（首次检测后固定，避免桌面端频繁重建 PyAudio 流）
+        if self.sampleRate != UInt32(detectedSampleRate) ||
+           self.channels != UInt8(detectedChannels) ||
+           self.format != outputFormat {
+            self.sampleRate = UInt32(detectedSampleRate)
+            self.channels = UInt8(detectedChannels)
+            self.format = outputFormat
+            print("AudioStream: format detected — \(detectedSampleRate)Hz / \(detectedChannels)ch / PCM16LE")
+        }
+
+        // 5. 分片发送（每片独立 seq，便于桌面端诊断丢包）
         let chunkSize = AudioStreamServer.maxPayloadBytes
         var offset = 0
-        while offset < data.count {
-            let end = min(offset + chunkSize, data.count)
-            let chunk = data.subdata(in: offset..<end)
+        while offset < pcmData.count {
+            let end = min(offset + chunkSize, pcmData.count)
+            let chunk = pcmData.subdata(in: offset..<end)
             send(chunk: chunk)
             offset = end
         }
+    }
+
+    // MARK: - 格式转换工具
+
+    private func convertFloatToInt16(_ data: Data) -> Data {
+        let floats: [Float] = data.withUnsafeBytes { ptr in
+            Array(ptr.bindMemory(to: Float.self))
+        }
+        let int16s = floats.map { Int16(max(-32768, min(32767, $0 * 32768.0))) }
+        return int16s.withUnsafeBufferPointer { Data(buffer: $0) }
+    }
+
+    private func convertInt32ToInt16(_ data: Data) -> Data {
+        let int32s: [Int32] = data.withUnsafeBytes { ptr in
+            Array(ptr.bindMemory(to: Int32.self))
+        }
+        let int16s = int32s.map { Int16(max(-32768, min(32767, $0 >> 16))) }
+        return int16s.withUnsafeBufferPointer { Data(buffer: $0) }
     }
 
     private func send(chunk: Data) {
