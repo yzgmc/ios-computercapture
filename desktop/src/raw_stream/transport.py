@@ -26,18 +26,39 @@ class RawStreamReceiver:
         self.on_frame = on_frame
         self._max_buffered = max_buffered_frames
         self._server: asyncio.AbstractServer | None = None
+        # 客户端模式（USB 直连）持有的读写流与后台任务
+        self._client_reader: asyncio.StreamReader | None = None
+        self._client_writer: asyncio.StreamWriter | None = None
+        self._client_task: asyncio.Task | None = None
         self._frame_count = 0
         # 接收 fps 统计
         self._recv_t0: float | None = None
         self._recv_n: int = 0
 
     async def start(self):
+        """LAN 模式：作为 TCP 服务器监听 host:port，等待 iOS 主动连接。"""
         self._server = await asyncio.start_server(
             self._handle_client, self.host, self.port,
         )
         logger.info("RawStreamReceiver listening on %s:%d (TCP)", self.host, self.port)
 
+    async def connect_client(self, host: str, port: int):
+        """USB 模式：作为 TCP 客户端连接 host:port。
+
+        数据流：本机 → PC 127.0.0.1:port → usbmuxd → iOS 127.0.0.1:port → iOS listener。
+        与 UsbmuxTcpForwarder 配合使用：forwarder 监听 PC 127.0.0.1:port，
+        本方法连接到该 forwarder，由 forwarder 转发到 iOS 端的 NWListener。
+        """
+        logger.info("RawStreamReceiver connecting to %s:%d (TCP client)", host, port)
+        self._client_reader, self._client_writer = await asyncio.open_connection(host, port)
+        self._client_task = asyncio.create_task(
+            self._read_frames(self._client_reader, self._client_writer,
+                              peer=f"{host}:{port}"),
+            name="raw-stream-client",
+        )
+
     async def stop(self):
+        # 关闭服务器模式
         if self._server is not None:
             self._server.close()
             try:
@@ -45,11 +66,34 @@ class RawStreamReceiver:
             except Exception:
                 pass
             self._server = None
+        # 关闭客户端模式
+        if self._client_task is not None:
+            self._client_task.cancel()
+            try:
+                await self._client_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._client_task = None
+        if self._client_writer is not None:
+            try:
+                self._client_writer.close()
+            except Exception:
+                pass
+            self._client_writer = None
+        self._client_reader = None
 
     async def _handle_client(self, reader: asyncio.StreamReader,
                              writer: asyncio.StreamWriter):
         peer = writer.get_extra_info("peername")
         logger.info("RawStream client connected: %s", peer)
+        await self._read_frames(reader, writer, peer=peer)
+
+    async def _read_frames(self, reader: asyncio.StreamReader,
+                           writer: asyncio.StreamWriter, peer):
+        """通用帧读取循环：服务器模式与客户端模式共用。
+
+        协议：28B 帧头（含 magic）+ payload_length 字节 payload，循环直至对端关闭。
+        """
         try:
             while True:
                 try:
@@ -114,6 +158,9 @@ class RawStreamReceiver:
                         logger.error("on_frame callback error: %s", e)
         except ConnectionResetError:
             logger.info("RawStream connection reset by %s", peer)
+        except asyncio.CancelledError:
+            logger.info("RawStream read loop cancelled from %s", peer)
+            raise
         except Exception as e:
             logger.error("RawStream client error: %s", e)
         finally:

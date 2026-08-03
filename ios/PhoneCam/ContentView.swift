@@ -367,21 +367,32 @@ struct ContentView: View {
     // MARK: - 业务逻辑
     private func connect() {
         Task {
-            // USB 模式：iOS 端通过 usbmuxd 桥接到 desktop 的 127.0.0.1，
-            // 数据流走 USB 物理通道。LAN 模式：iOS 主动连接 desktop 的局域网 IP。
-            let effectiveHost = (transportMode == "usb") ? "127.0.0.1" : rawStreamHost
+            // USB 模式架构（UsbmuxTcpForwarder 数据流方向）：
+            //   桌面客户端 → PC 127.0.0.1:port → usbmuxd → iOS 127.0.0.1:port → iOS listener
+            // 即：USB 模式下 iOS 端必须是 TCP 服务器（NWListener），
+            //     LAN 模式下 iOS 端是 TCP 客户端（NWConnection 主动连接桌面）。
+            let isUSB = (transportMode == "usb")
 
-            // 启动 TCP 连接（不等 ready，先发起）
+            // 启动传输（不等 ready，先发起）
             var tcpReady = false
             var udpReady = false
             if rawStreamEnabled, let port = UInt16(rawStreamPort) {
                 captureManager.rawStreamServer = rawStreamServer
-                rawStreamServer.start(host: effectiveHost, port: port) { ready in
-                    tcpReady = ready
+                if isUSB {
+                    await MainActor.run { statusMessage = "USB 监听中 :\(port)…" }
+                    rawStreamServer.startServer(port: port) { ready in
+                        tcpReady = ready
+                    }
+                } else {
+                    rawStreamServer.start(host: rawStreamHost, port: port) { ready in
+                        tcpReady = ready
+                    }
                 }
             }
             if audioStreamEnabled, let port = UInt16(audioStreamPort) {
                 captureManager.audioStreamServer = audioStreamServer
+                // 音频 UDP 在两种模式下都主动连接桌面（USB 走 usbmuxd UDP 桥接）
+                let effectiveHost = isUSB ? "127.0.0.1" : rawStreamHost
                 audioStreamServer.start(host: effectiveHost, port: port) { ready in
                     udpReady = ready
                 }
@@ -393,8 +404,8 @@ struct ContentView: View {
             }
             if !tcpReady {
                 await MainActor.run {
-                    if transportMode == "usb" {
-                        statusMessage = "USB 直连失败，请确认桌面端已切换到 USB 模式且 iPhone 已连接 USB"
+                    if isUSB {
+                        statusMessage = "USB 监听失败，请确认桌面端已切换到 USB 模式且 iPhone 已通过 USB 连接"
                     } else {
                         statusMessage = "连接桌面端失败，请检查 IP/端口"
                     }
@@ -406,8 +417,8 @@ struct ContentView: View {
             await captureManager.startCapture()
             await MainActor.run {
                 isSharing = true
-                let mode = transportMode == "usb" ? "USB" : rawStreamHost
-                statusMessage = "正在共享 → \(mode):\(rawStreamPort)/\(audioStreamPort)"
+                let mode = isUSB ? "USB" : rawStreamHost
+                statusMessage = "已连接 → \(mode):\(rawStreamPort)/\(audioStreamPort)"
             }
         }
     }

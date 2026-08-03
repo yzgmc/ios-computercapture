@@ -33,6 +33,7 @@ final class RawStreamServer {
     private static let magic: [UInt8] = [0x52, 0x41, 0x57, 0x31] // "RAW1"
 
     private var connection: NWConnection?
+    private var listener: NWListener?
     private let queue = DispatchQueue(label: "com.yzg.phonecam.rawstream")
     private var frameID: UInt32 = 0
     private(set) var isRunning = false
@@ -94,9 +95,63 @@ final class RawStreamServer {
         connection = conn
     }
 
+    /// USB 模式：作为 TCP 服务器监听 port，等待桌面端通过 usbmuxd 桥接访问。
+    /// 数据流：桌面客户端 → PC 127.0.0.1:port → usbmuxd → iOS 127.0.0.1:port → 此 listener。
+    /// onReady 在 listener.state == .ready 时回调（表示端口已开始监听）。
+    func startServer(port: UInt16, onReady: ((Bool) -> Void)? = nil) {
+        guard !isRunning else {
+            print("RawStream: startServer() ignored, already running")
+            onReady?(true)
+            return
+        }
+        do {
+            let listener = try NWListener(using: .tcp, on: NWEndpoint.Port(integerLiteral: port))
+            var isFirstReady = true
+            listener.stateUpdateHandler = { [weak self] state in
+                switch state {
+                case .setup:
+                    print("RawStream listener: setup on :\(port)")
+                case .ready:
+                    print("RawStream listener: ready on :\(port)")
+                    self?.isRunning = true
+                    if isFirstReady {
+                        isFirstReady = false
+                        onReady?(true)
+                    }
+                case .waiting(let err):
+                    print("RawStream listener: waiting (\(err))")
+                    onReady?(false)
+                case .failed(let err):
+                    print("RawStream listener: failed (\(err))")
+                    self?.isRunning = false
+                    onReady?(false)
+                case .cancelled:
+                    print("RawStream listener: cancelled")
+                    self?.isRunning = false
+                    onReady?(false)
+                @unknown default:
+                    print("RawStream listener: unknown state")
+                }
+            }
+            listener.newConnectionHandler = { [weak self] conn in
+                print("RawStream listener: accepted connection from \(String(describing: conn.endpoint))")
+                // USB 模式只接受一条连接（桌面端唯一客户端）
+                self?.connection = conn
+                conn.start(queue: self?.queue ?? .global())
+            }
+            listener.start(queue: queue)
+            self.listener = listener
+        } catch {
+            print("RawStream listener: create failed (\(error))")
+            onReady?(false)
+        }
+    }
+
     func stop() {
         connection?.cancel()
         connection = nil
+        listener?.cancel()
+        listener = nil
         isRunning = false
         frameID = 0
     }

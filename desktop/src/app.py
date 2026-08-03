@@ -217,7 +217,11 @@ class PhoneCamApp(QObject):
 
     @asyncSlot()
     async def enable_usb_mode(self):
-        """用户点击"切换到 USB 模式"：建桥接，等待 iPhone USB 接入。"""
+        """用户点击"切换到 USB 模式"：建桥接，等待 iPhone USB 接入。
+
+        架构：iOS 端作为 TCP 服务器监听 5000，桌面端作为 TCP 客户端连接
+        PC 127.0.0.1:5000（由 UsbmuxTcpForwarder 转发到 iOS 127.0.0.1:5000）。
+        """
         if self._mode == MODE_USB:
             return
         if not is_usb_available():
@@ -238,8 +242,8 @@ class PhoneCamApp(QObject):
         devs = await list_ios_devices()
         if devs:
             await self.usb_manager._ensure_bridges(devs[0]["udid"])
-        # 关闭 LAN 监听（接收器只接受 127.0.0.1 桥接）
-        await self._restart_receivers(listen_host="127.0.0.1")
+        # 重启接收器：TCP 用客户端模式连接 forwarder，UDP 仍监听 127.0.0.1
+        await self._restart_receivers(listen_host="127.0.0.1", use_tcp_client=True)
         self._emit_state("info", "等待 iPhone 通过 USB 连接...")
         self._emit_devices()
 
@@ -255,8 +259,14 @@ class PhoneCamApp(QObject):
         await self._restart_receivers(listen_host="0.0.0.0")
         self._emit_devices()
 
-    async def _restart_receivers(self, listen_host: str):
-        """重启接收器，绑定到 listen_host。"""
+    async def _restart_receivers(self, listen_host: str,
+                                 use_tcp_client: bool = False):
+        """重启接收器，绑定到 listen_host。
+
+        :param use_tcp_client: True=USB 模式，raw_receiver 作为 TCP 客户端
+            连接 127.0.0.1:RAW_STREAM_PORT（forwarder 监听端口）；
+            False=LAN 模式，raw_receiver 作为 TCP 服务器监听。
+        """
         try:
             await self.raw_receiver.stop()
         except Exception:
@@ -271,10 +281,26 @@ class PhoneCamApp(QObject):
         self.audio_receiver = AudioStreamReceiver(
             host=listen_host, port=AUDIO_STREAM_PORT, on_packet=self._on_audio_packet
         )
-        try:
-            await self.raw_receiver.start()
-        except Exception as e:
-            self._emit_state("error", f"重启 TCP 接收器失败: {e}")
+        if use_tcp_client:
+            # USB 模式：作为客户端连接 forwarder（forwarder 已由 UsbBridgeManager 启动）。
+            # forwarder 启动是异步的，需重试等待端口就绪。
+            connected = False
+            for attempt in range(10):
+                try:
+                    await self.raw_receiver.connect_client("127.0.0.1", RAW_STREAM_PORT)
+                    connected = True
+                    break
+                except (ConnectionError, OSError) as e:
+                    self._emit_state("info",
+                                     f"等待 USB 桥接就绪… ({attempt + 1}/10)")
+                    await asyncio.sleep(0.5)
+            if not connected:
+                self._emit_state("error", "USB 桥接连接失败：forwarder 未就绪")
+        else:
+            try:
+                await self.raw_receiver.start()
+            except Exception as e:
+                self._emit_state("error", f"重启 TCP 接收器失败: {e}")
         try:
             await self.audio_receiver.start()
         except Exception as e:
