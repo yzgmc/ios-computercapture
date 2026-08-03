@@ -30,7 +30,7 @@ private extension Int32 {
 /// 相比 UDP 分片方案，TCP 整帧传输不会因丢包导致每帧无法重组。
 final class RawStreamServer {
     static let headerSize = 28
-    private static let magic: [UInt8] = [0x52, 0x41, 0x57, 0x49] // "RAW1"
+    private static let magic: [UInt8] = [0x52, 0x41, 0x57, 0x31] // "RAW1"
 
     private var connection: NWConnection?
     private let queue = DispatchQueue(label: "com.yzg.phonecam.rawstream")

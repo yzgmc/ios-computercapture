@@ -60,8 +60,8 @@ class RawStreamReceiver:
                     break
 
                 if not is_valid_header(header):
-                    logger.warning("RawStream invalid magic from %s, got bytes=%s, closing",
-                                   peer, header[:8].hex())
+                    logger.warning("RawStream invalid magic from %s, len=%d, got bytes=%s, closing",
+                                   peer, len(header), header[:8].hex())
                     break
                 fields = unpack_header(header)
                 payload_length = fields["payload_length"]
