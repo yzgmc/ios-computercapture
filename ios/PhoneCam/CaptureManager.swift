@@ -1,4 +1,6 @@
 import AVFoundation
+import CoreImage
+import ImageIO
 import UIKit
 
 enum CaptureResolution: CaseIterable, Identifiable {
@@ -41,12 +43,20 @@ class CaptureManager: NSObject, ObservableObject {
     @Published var flipVertical: Bool = false
     // 摄像头实际输出尺寸（由 activeFormat 决定），用于预览按真实比例渲染
     @Published var actualCaptureSize: CGSize = CGSize(width: 1280, height: 720)
+    /// 压缩模式：false=BGRA 无压缩(带宽高), true=JPEG 85(1080p 60fps 可行)
+    @Published var useJPEGCompression: Bool = true
 
     private let captureSession = AVCaptureSession()
     private var videoDeviceInput: AVCaptureDeviceInput?
     private var videoOutput: AVCaptureVideoDataOutput?
     private var audioOutput: AVCaptureAudioDataOutput?
     private var previewLayer: AVCaptureVideoPreviewLayer?
+
+    /// JPEG 编码复用的 CIContext（硬件加速）
+    private let ciContext = CIContext(options: [
+        .useSoftwareRenderer: false,
+        .priorityRequestLow: true,
+    ])
 
     /// 原画质传输模块，启用后每帧视频采样都会转发（BGRA 无压缩 TCP）
     var rawStreamServer: RawStreamServer?
@@ -325,11 +335,37 @@ extension CaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptur
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
         if output is AVCaptureVideoDataOutput {
-            // 视频帧转发到原画质 TCP 模块（采集格式已为 BGRA，无需转换）
-            rawStreamServer?.processSampleBuffer(sampleBuffer, requiresBGRAConversion: false)
+            if useJPEGCompression {
+                // JPEG 压缩路径：1080p 60fps 必需，带宽降到 ~10-20 MB/s
+                processVideoFrameAsJPEG(sampleBuffer)
+            } else {
+                // BGRA 无压缩路径：带宽极高（1080p60 ≈ 500 MB/s），仅 WiFi 6/USB 3 可用
+                rawStreamServer?.processSampleBuffer(sampleBuffer, requiresBGRAConversion: false)
+            }
         } else if output is AVCaptureAudioDataOutput {
             // 音频帧转发到 UDP 模块（AudioStreamServer 动态检测格式并转换为 PCM16LE）
             audioStreamServer?.processSampleBuffer(sampleBuffer)
         }
+    }
+
+    /// 将 CVPixelBuffer 用 CIContext 编码为 JPEG，再交给 RawStreamServer 发送。
+    /// format=10 (JPEG) 时，width/height 仍是原始像素尺寸，bytes_per_row=0，
+    /// payload 为 JPEG 字节流。桌面端据此用 PIL/numpy 解码。
+    private func processVideoFrameAsJPEG(_ sampleBuffer: CMSampleBuffer) {
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+
+        // CIImage 从 CVPixelBuffer 创建（零拷贝）
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+
+        // 硬件 JPEG 编码，质量 0.85 视觉接近无损
+        guard let jpegData = ciContext.jpegRepresentation(
+            of: ciImage,
+            colorSpace: CGColorSpaceCreateDeviceRGB(),
+            options: [kCGImageDestinationLossyCompressionQuality as String: 0.85]
+        ) else { return }
+
+        rawStreamServer?.processJPEGFrame(jpegData, width: width, height: height)
     }
 }

@@ -2,6 +2,7 @@ PyQt6>=6.4.0
 qasync>=0.24.0
 numpy>=1.24.0
 opencv-python>=4.8.0
+Pillow>=10.0.0  # JPEG 帧解码
 pyaudio>=0.2.13
 pyvirtualcam>=0.10.0
 pyusb>=1.2.1

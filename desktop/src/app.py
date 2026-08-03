@@ -99,35 +99,54 @@ class PhoneCamApp(QObject):
 
     def _display_raw_frame(self, raw: bytes, width: int, height: int,
                            pixel_format: int, bytes_per_row: int):
-        """在主线程将 BGRA 原始帧渲染到预览控件。"""
+        """在主线程将原始帧渲染到预览控件。支持 BGRA(0) 和 JPEG(10)。"""
         try:
             import cv2
             import numpy as np
-            if pixel_format != PixelFormat.BGRA:
+            from PIL import Image
+            import io
+
+            if pixel_format == PixelFormat.JPEG:
+                # JPEG 解码：raw 是 JPEG 字节流
+                try:
+                    img = Image.open(io.BytesIO(raw))
+                    img = img.convert("RGB")
+                except Exception as e:
+                    logger.warning("JPEG decode failed: %s", e)
+                    return
+                if not getattr(self, "_raw_first_frame_logged", False):
+                    logger.info("Raw stream first JPEG frame: %dx%d payload=%d",
+                                width, height, len(raw))
+                    self._raw_first_frame_logged = True
+                    self.window.set_actual_resolution(width, height)
+                    if not self.virtual_camera.enabled:
+                        self.virtual_camera.width = width
+                        self.virtual_camera.height = height
+                rgb = np.array(img)
+            elif pixel_format == PixelFormat.BGRA:
+                expected = bytes_per_row * height
+                if len(raw) < expected:
+                    logger.warning("Raw payload truncated: got %d, expected %d (w=%d h=%d bpr=%d)",
+                                   len(raw), expected, width, height, bytes_per_row)
+                    return
+                if not getattr(self, "_raw_first_frame_logged", False):
+                    logger.info("Raw stream first frame: %dx%d bpr=%d payload=%d",
+                                width, height, bytes_per_row, len(raw))
+                    self._raw_first_frame_logged = True
+                    self.window.set_actual_resolution(width, height)
+                    if not self.virtual_camera.enabled:
+                        self.virtual_camera.width = width
+                        self.virtual_camera.height = height
+                arr = np.frombuffer(raw[:expected], dtype=np.uint8)
+                stride_bytes = max(bytes_per_row, width * 4)
+                arr = arr.reshape(height, stride_bytes)[:, :width * 4].reshape(height, width, 4)
+                # BGRA -> BGR (供 OpenCV/Qt 使用)
+                bgr = arr[:, :, :3]
+                rgb = bgr[:, :, ::-1]
+            else:
                 logger.warning("Unsupported raw pixel format: %d", pixel_format)
                 return
-            expected = bytes_per_row * height
-            if len(raw) < expected:
-                logger.warning("Raw payload truncated: got %d, expected %d (w=%d h=%d bpr=%d)",
-                               len(raw), expected, width, height, bytes_per_row)
-                return
-            if not getattr(self, "_raw_first_frame_logged", False):
-                logger.info("Raw stream first frame: %dx%d bpr=%d payload=%d",
-                            width, height, bytes_per_row, len(raw))
-                self._raw_first_frame_logged = True
-                # 首帧到达时同步 UI 上的分辨率显示
-                self.window.set_actual_resolution(width, height)
-                # 把实际分辨率同步到虚拟摄像头（仅在未启用时生效；
-                # 已启用时维持原格式，由 worker 缩放）
-                if not self.virtual_camera.enabled:
-                    self.virtual_camera.width = width
-                    self.virtual_camera.height = height
-            arr = np.frombuffer(raw[:expected], dtype=np.uint8)
-            stride_bytes = max(bytes_per_row, width * 4)
-            arr = arr.reshape(height, stride_bytes)[:, :width * 4].reshape(height, width, 4)
-            # BGRA -> BGR (供 OpenCV/Qt 使用)
-            bgr = arr[:, :, :3]
-            rgb = bgr[:, :, ::-1]
+
             # 应用翻转（与只读控件状态一致）
             if self.window.flip_horizontal_checkbox.isChecked() and self.window.flip_vertical_checkbox.isChecked():
                 rgb = cv2.flip(rgb, -1)

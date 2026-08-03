@@ -25,6 +25,7 @@ class PixelFormat:
     BGRA = 0
     RGBA = 1
     YUV422 = 2  # (U Y V Y 打包)
+    JPEG = 10   # JPEG 编码的 BGRA，payload 是 JPEG 字节流
 
 
 def pack_header(frame_id: int, width: int, height: int,

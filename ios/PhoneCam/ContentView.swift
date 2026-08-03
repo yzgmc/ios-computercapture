@@ -148,6 +148,22 @@ struct ContentView: View {
                 .tint(Color.accentBlue)
                 .disabled(isSharing)
             }
+
+            Divider()
+
+            // 压缩模式：JPEG 85 (推荐) 或 BGRA 无压缩
+            HStack {
+                Text("压缩模式")
+                    .font(.subheadline)
+                    .foregroundStyle(Color.secondaryText)
+                Spacer()
+                Picker("压缩", selection: $captureManager.useJPEGCompression) {
+                    Text("JPEG 85 (1080p60)").tag(true)
+                    Text("BGRA 无压缩").tag(false)
+                }
+                .pickerStyle(.menu)
+                .disabled(isSharing)
+            }
         }
         .padding()
         .background(Color.cardBackground)

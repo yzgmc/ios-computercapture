@@ -15,19 +15,33 @@ DEFAULT_TCP_PORT = 5000
 DEFAULT_UDP_PORT = 5001
 
 # pymobiledevice3 的接口可能因版本变化，按需 try/except
+# 新版 (3.x) 只暴露 UsbmuxTcpForwarder / LockdownTcpForwarder；
+# 旧版 (2.x) 名字是 TcpForwarder。两者参数顺序不同。
 try:
-    from pymobiledevice3.tcp_forwarder import TcpForwarder as _Pm3TcpForwarder
+    from pymobiledevice3.tcp_forwarder import UsbmuxTcpForwarder as _Pm3TcpForwarder
     from pymobiledevice3.usbmuxd import (
         connect as usbmuxd_connect,
         list_devices as usbmuxd_list_devices,
     )
     _PM3_AVAILABLE = True
-except ImportError as e:
-    logger.warning("pymobiledevice3 not available: %s", e)
-    _PM3_AVAILABLE = False
-except Exception as e:  # usbmuxd 后端未启动等
-    logger.warning("pymobiledevice3 import failed: %s", e)
-    _PM3_AVAILABLE = False
+    _PM3_NEW_API = True  # 新版 API：UsbmuxTcpForwarder(serial, dst_port, src_port)
+except ImportError:
+    try:
+        from pymobiledevice3.tcp_forwarder import TcpForwarder as _Pm3TcpForwarder
+        from pymobiledevice3.usbmuxd import (
+            connect as usbmuxd_connect,
+            list_devices as usbmuxd_list_devices,
+        )
+        _PM3_AVAILABLE = True
+        _PM3_NEW_API = False  # 旧版 API：TcpForwarder(udid, src_port, dst_port)
+    except ImportError as e:
+        logger.warning("pymobiledevice3 not available: %s", e)
+        _PM3_AVAILABLE = False
+        _PM3_NEW_API = False
+    except Exception as e:  # usbmuxd 后端未启动等
+        logger.warning("pymobiledevice3 import failed: %s", e)
+        _PM3_AVAILABLE = False
+        _PM3_NEW_API = False
 
 
 def is_usb_available() -> bool:
@@ -112,26 +126,41 @@ class UsbBridge:
         self._set_state("stopped")
 
     async def _run(self):
-        """实际转发循环。pymobiledevice3 的 TcpForwarder 阻塞运行，
-        在独立线程跑并监听 stop_event。"""
+        """实际转发循环。pymobiledevice3 的 UsbmuxTcpForwarder 是 async 上下文管理器。"""
         self._set_state("running")
-        loop = asyncio.get_running_loop()
-
-        def _run_forwarder():
-            try:
-                with _Pm3TcpForwarder(self.udid, self.host_port, self.device_port):
-                    # 阻塞，直到 stop_event 或异常
-                    while not self._stop_event.is_set():
-                        import time
-                        time.sleep(0.2)
-            except Exception as e:
-                logger.error("USB bridge forwarder error: %s", e)
-                self._set_state("error")
 
         try:
-            await loop.run_in_executor(None, _run_forwarder)
+            # 新版 API：UsbmuxTcpForwarder(serial, dst_port, src_port)
+            # 旧版 API：TcpForwarder(udid, src_port, dst_port)
+            # 注意参数顺序不同！
+            if _PM3_NEW_API:
+                forwarder = _Pm3TcpForwarder(
+                    serial=self.udid,
+                    dst_port=self.device_port,
+                    src_port=self.host_port,
+                )
+            else:
+                forwarder = _Pm3TcpForwarder(
+                    self.udid,
+                    self.host_port,    # src_port
+                    self.device_port,  # dst_port
+                )
+
+            # UsbmuxTcpForwarder 实现了 async __aenter__/__aexit__
+            async with forwarder:
+                self._set_state("running")
+                while not self._stop_event.is_set():
+                    try:
+                        await asyncio.wait_for(self._stop_event.wait(), timeout=0.5)
+                    except asyncio.TimeoutError:
+                        continue
         except asyncio.CancelledError:
             pass
+        except Exception as e:
+            logger.error("USB bridge forwarder error: %s", e)
+            self._set_state("error")
+            return
+
         if self.state not in ("error", "stopped"):
             self._set_state("stopped")
 
