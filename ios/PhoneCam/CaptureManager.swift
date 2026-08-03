@@ -431,17 +431,13 @@ extension CaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptur
         // 懒配置：首次或尺寸/fps 变化时（re）创建 VTCompressionSession
         h264Encoder.configure(width: width, height: height, fps: fps)
 
-        // 起流首帧强制 IDR，确保接收端解码器立即拿到关键帧
-        let forceKey = h264NeedsKeyframe
-        if forceKey { h264NeedsKeyframe = false }
-
         // 设置编码输出回调（每次都设，确保 rawStreamServer 引用最新）
         h264Encoder.onFrame = { [weak self] data, isKeyframe in
             self?.rawStreamServer?.processH264Frame(data, width: width, height: height,
                                                      isKeyframe: isKeyframe)
         }
 
-        h264Encoder.encode(pixelBuffer, forceKeyframe: forceKey)
+        h264Encoder.encode(pixelBuffer)
     }
 }
 

@@ -1,4 +1,5 @@
 import Foundation
+import QuartzCore
 import VideoToolbox
 import CoreVideo
 import CoreMedia
@@ -24,10 +25,6 @@ final class H264Encoder {
     var onFrame: ((Data, Bool) -> Void)?
 
     /// 初始化/重置编码器。调用时机：采集启动后已知实际分辨率时。
-    /// - Parameters:
-    ///   - width: 像素宽（必须与 CVPixelBuffer 一致）
-    ///   - height: 像素高
-    ///   - fps: 期望帧率（用于码率估算与 ExpectedFrameRate）
     func configure(width: Int, height: Int, fps: Int) {
         if self.session != nil && self.width == width && self.height == height {
             return  // 已配置且尺寸未变
@@ -49,8 +46,8 @@ final class H264Encoder {
             imageBufferAttributes: nil,
             compressedDataAllocator: nil,
             outputCallback: nil,
-            refCon: nil,
-            sessionOut: &session
+            refcon: nil,
+            compressionSessionOut: &session
         )
         guard status == noErr, let session = session else {
             print("H264Encoder: VTCompressionSessionCreate failed status=\(status)")
@@ -81,34 +78,24 @@ final class H264Encoder {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits,
                              value: limitArray as CFTypeRef)
 
-        let prepareStatus = VTSessionPrepareToEncodeFrames(session)
-        if prepareStatus != noErr {
-            print("H264Encoder: prepare failed status=\(prepareStatus)")
-        }
-
         self.session = session
         print("H264Encoder: configured \(width)x\(height) @ \(fps)fps bitrate=\(bitrate/1000)kbps")
     }
 
     /// 编码一帧。pixelBuffer 通常来自 AVCaptureVideoDataOutput，格式 BGRA。
-    /// - Parameter forceKeyframe: 强制输出 IDR（用于起流/断线重连后首帧）。
-    func encode(_ pixelBuffer: CVPixelBuffer, forceKeyframe: Bool = false) {
+    /// 注：首帧默认输出 IDR（VTCompressionSession 行为），无需手动强制关键帧。
+    func encode(_ pixelBuffer: CVPixelBuffer) {
         guard let session = session else { return }
-        if forceKeyframe {
-            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ForceKeyFrame,
-                                 value: 1 as CFTypeRef)
-        }
         // PTS 用 CACurrentMediaTime 毫秒级单调递增；实时流不依赖 DTS/PTS 严格顺序，
         // 编码器只需时间戳做码率控制与 GOP 时长计算。
         let pts = CMTime(value: CMTimeValue(CACurrentMediaTime() * 1000), timescale: 1000)
-        var info = VTEncodeFrameInfoFlags(rawValue: 0)
         let status = VTCompressionSessionEncodeFrame(
             session,
             imageBuffer: pixelBuffer,
             presentationTimeStamp: pts,
             duration: CMTime.invalid,
             frameProperties: nil,
-            infoFlagsOut: &info,
+            infoFlagsOut: nil,
             outputHandler: { [weak self] _, _, sampleBuffer in
                 guard let sampleBuffer = sampleBuffer else { return }
                 self?.handleEncoded(sampleBuffer)
@@ -122,7 +109,7 @@ final class H264Encoder {
     /// 释放编码器。下次 configure 后可重新使用。
     func teardown() {
         if let session = session {
-            VTCompressionSessionCompleteFrames(session, until: CMTime.positiveInfinity)
+            VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: CMTime.positiveInfinity)
             VTCompressionSessionInvalidate(session)
             self.session = nil
         }
@@ -153,29 +140,52 @@ final class H264Encoder {
         var annexB = Data()
         // 关键帧前输出 SPS/PPS（让接收端无需依赖前置参数集）
         if isKeyframe {
-            for i in 0..<2 {
+            // 先用 index=0 探测参数集总数
+            var totalCount: Int = 0
+            var probePtr: UnsafePointer<UInt8>?
+            var probeSize: Int = 0
+            var probeNalLen: Int32 = 0
+            let probeStatus = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                formatDesc,
+                parameterSetIndex: 0,
+                parameterSetPointerOut: &probePtr,
+                parameterSetSizeOut: &probeSize,
+                parameterSetCountOut: &totalCount,
+                nalUnitHeaderLengthOut: &probeNalLen)
+            guard probeStatus == noErr else {
+                // 无参数集，直接走 NAL 提取
+                extractNALs(from: sampleBuffer, into: &annexB)
+                if !annexB.isEmpty { onFrame?(annexB, isKeyframe) }
+                return
+            }
+            // 遍历所有参数集（典型 H.264 有 SPS+PPS 共 2 个）
+            for i in 0..<totalCount {
                 var ptr: UnsafePointer<UInt8>?
                 var size: Int = 0
-                var type: VideoToolbox.VTFormatDescriptionType = []
-                var desc: CMVideoFormatDescription?
+                var count: Int = 0
+                var nalLen: Int32 = 0
                 let r = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
                     formatDesc,
                     parameterSetIndex: i,
                     parameterSetPointerOut: &ptr,
                     parameterSetSizeOut: &size,
-                    parameterSetTypeOut: &type,
-                    formatDescriptionOut: &desc)
+                    parameterSetCountOut: &count,
+                    nalUnitHeaderLengthOut: &nalLen)
                 guard r == noErr, let p = ptr else { break }
                 annexB.append(Self.startCode)
                 annexB.append(p, count: size)
             }
         }
 
-        // 从 CMBlockBuffer 提取 AVCC NALs，转换每条为 Annex-B
-        guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else {
-            if !annexB.isEmpty { onFrame?(annexB, isKeyframe) }
-            return
-        }
+        extractNALs(from: sampleBuffer, into: &annexB)
+
+        if annexB.isEmpty { return }
+        onFrame?(annexB, isKeyframe)
+    }
+
+    /// 从 sampleBuffer 的 CMBlockBuffer 提取 AVCC NALs，转换为 Annex-B 追加到 annexB。
+    private func extractNALs(from sampleBuffer: CMSampleBuffer, into annexB: inout Data) {
+        guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
         let totalLength = CMBlockBufferGetDataLength(blockBuffer)
         var data = Data(count: totalLength)
         data.withUnsafeMutableBytes { (rawBuf: UnsafeMutableRawBufferPointer) in
@@ -195,9 +205,6 @@ final class H264Encoder {
             annexB.append(data[nalStart..<nalEnd])
             offset = nalEnd
         }
-
-        if annexB.isEmpty { return }
-        onFrame?(annexB, isKeyframe)
     }
 
     /// Annex-B 起始码：00 00 00 01
