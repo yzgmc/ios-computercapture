@@ -25,23 +25,8 @@ final class SRTStreamServer: VideoStreamTransport {
     static let headerSize = 28
     private static let magic: [UInt8] = [0x52, 0x41, 0x57, 0x31] // "RAW1"
 
-    // MARK: - SRT 常量（值取自 srt.h v1.5.4，避免依赖 C enum 在 Swift 的导入）
-    private let SRT_INVALID_SOCK: Int32 = -1
-    private let SRT_ERROR: Int32 = -1
-    private let SRTT_LIVE: Int32 = 0
-    // SRT_SOCKOPT（非连续枚举）
-    private let SRTO_SNDSYN: Int32 = 1
-    private let SRTO_SNDTIMEO: Int32 = 13
-    private let SRTO_RCVTIMEO: Int32 = 14
-    private let SRTO_REUSEADDR: Int32 = 15
-    private let SRTO_TSBPDMODE: Int32 = 22
-    private let SRTO_LATENCY: Int32 = 23
-    private let SRTO_TLPKTDROP: Int32 = 31
-    private let SRTO_CONNTIMEO: Int32 = 36
-    private let SRTO_MESSAGEAPI: Int32 = 48
-    private let SRTO_TRANSTYPE: Int32 = 50
-    private let SRTO_PEERIDLETIMEO: Int32 = 55
-    private let SRTO_SNDDATA: Int32 = 19
+    // SRT 常量直接使用 libsrt 模块导出的全局符号（SRT_INVALID_SOCK / SRT_ERROR
+    // 为 Int32 全局常量；SRTO_* 为 SRT_SOCKOPT 枚举值；SRTT_LIVE 为 SRT_TRANSTYPE 枚举值）
 
     // MARK: - 状态
     private var socket: Int32 = -1
@@ -273,7 +258,7 @@ final class SRTStreamServer: VideoStreamTransport {
         var conntimeo: Int32 = 3000     // ms
         var peeridle: Int32 = 5000      // ms
         var sndtimeo: Int32 = 1000      // ms，便于 stop 检查 + 防止 send 永久阻塞
-        var transtype: Int32 = SRTT_LIVE
+        var transtype: SRT_TRANSTYPE = SRTT_LIVE
 
         _ = _setOpt(sock, SRTO_TRANSTYPE, &transtype)
         _ = _setOpt(sock, SRTO_TSBPDMODE, &yes)
@@ -288,7 +273,7 @@ final class SRTStreamServer: VideoStreamTransport {
     }
 
     @discardableResult
-    private func _setOpt<T>(_ sock: Int32, _ opt: Int32, _ val: inout T) -> Int32 {
+    private func _setOpt<T>(_ sock: Int32, _ opt: SRT_SOCKOPT, _ val: inout T) -> Int32 {
         let rc = withUnsafePointer(to: &val) { ptr -> Int32 in
             srt_setsockflag(sock, opt, ptr, Int32(MemoryLayout<T>.size))
         }
