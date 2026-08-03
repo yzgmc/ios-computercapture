@@ -1,6 +1,5 @@
 import AVFoundation
 import CoreImage
-import ImageIO
 import UIKit
 
 enum CaptureResolution: CaseIterable, Identifiable {
@@ -51,12 +50,6 @@ class CaptureManager: NSObject, ObservableObject {
     private var videoOutput: AVCaptureVideoDataOutput?
     private var audioOutput: AVCaptureAudioDataOutput?
     private var previewLayer: AVCaptureVideoPreviewLayer?
-
-    /// JPEG 编码复用的 CIContext（硬件加速）
-    private let ciContext = CIContext(options: [
-        .useSoftwareRenderer: false,
-        .priorityRequestLow: true,
-    ])
 
     /// 原画质传输模块，启用后每帧视频采样都会转发（BGRA 无压缩 TCP）
     var rawStreamServer: RawStreamServer?
@@ -348,7 +341,7 @@ extension CaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptur
         }
     }
 
-    /// 将 CVPixelBuffer 用 CIContext 编码为 JPEG，再交给 RawStreamServer 发送。
+    /// 将 CVPixelBuffer 用 CIContext + UIImage 编码为 JPEG，再交给 RawStreamServer 发送。
     /// format=10 (JPEG) 时，width/height 仍是原始像素尺寸，bytes_per_row=0，
     /// payload 为 JPEG 字节流。桌面端据此用 PIL/numpy 解码。
     private func processVideoFrameAsJPEG(_ sampleBuffer: CMSampleBuffer) {
@@ -356,17 +349,12 @@ extension CaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptur
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
 
-        // CIImage 从 CVPixelBuffer 创建（零拷贝）
+        // CIImage 从 CVPixelBuffer 创建（零拷贝），再用 UIImage.jpegData 编码
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        let uiImage = UIImage(ciImage: ciImage)
 
-        // 硬件 JPEG 编码，质量 0.85 视觉接近无损
-        // CIContext.jpegRepresentation 的 options 是 [CIImageRepresentationOption: Any]
-        // 而 lossQuality 在 CIImage 选项中是 kCIImageRepresentationLossyCompressionQuality
-        guard let jpegData = ciContext.jpegRepresentation(
-            of: ciImage,
-            colorSpace: CGColorSpaceCreateDeviceRGB(),
-            options: [kCIImageRepresentationLossyCompressionQuality as CIImageRepresentationOption: 0.85]
-        ) else { return }
+        // JPEG 质量参数 0.85，视觉接近无损，1080p 单帧约 200-400KB
+        guard let jpegData = uiImage.jpegData(compressionQuality: 0.85) else { return }
 
         rawStreamServer?.processJPEGFrame(jpegData, width: width, height: height)
     }
