@@ -11,8 +11,9 @@ from typing import Optional, Callable, Awaitable
 logger = logging.getLogger(__name__)
 
 # 默认端口
-DEFAULT_TCP_PORT = 5000
-DEFAULT_UDP_PORT = 5001
+DEFAULT_TCP_PORT = 5000       # 视频（TCP）
+DEFAULT_UDP_PORT = 5001       # 音频（UDP，仅 LAN / SRT）
+DEFAULT_AUDIO_TCP_PORT = 5002  # 音频（TCP，仅 USB 直连；usbmuxd 不转发 UDP）
 
 # pymobiledevice3 的接口可能因版本变化，按需 try/except
 # 新版 (3.x) 模块叫 usbmux（无 d），旧版叫 usbmuxd
@@ -208,10 +209,13 @@ class UsbBridgeManager:
     def __init__(self,
                  tcp_port: int = DEFAULT_TCP_PORT,
                  udp_port: int = DEFAULT_UDP_PORT,
+                 audio_tcp_port: int = DEFAULT_AUDIO_TCP_PORT,
                  on_state: Optional[Callable[[str, str], None]] = None,
                  on_devices_changed: Optional[Callable[[list], Awaitable[None]]] = None):
         self.tcp_port = tcp_port
         self.udp_port = udp_port
+        # USB 模式下音频改用 TCP 转发（usbmuxd 不支持 UDP 转发）
+        self.audio_tcp_port = audio_tcp_port
         # on_state(level, message): level ∈ info/warn/error
         self.on_state = on_state or (lambda lvl, msg: None)
         # on_devices_changed(devices)
@@ -261,23 +265,44 @@ class UsbBridgeManager:
         self._log("info", "USB 直连已停止")
 
     async def _ensure_bridges(self, udid: str):
-        """为指定 udid 建立 TCP 桥接（UDP 走 tethering/Wi-Fi，不做桥接）。"""
-        if udid in self._bridges and "tcp" in self._bridges[udid]:
-            return
-        self._log("info", f"建立 USB 桥接 → {udid[:8]}... (TCP {self.tcp_port}↔{self.tcp_port})")
-        bridge = UsbBridge(udid, self.tcp_port, self.tcp_port,
-                           on_state_change=lambda s: self._log("info", f"[{udid[:8]}] 桥接状态: {s}"))
-        try:
-            await bridge.start()
-            self._bridges.setdefault(udid, {})["tcp"] = bridge
-            self._current_udid = udid
-            if self.on_devices_changed:
-                try:
-                    await self.on_devices_changed(self.get_active_devices())
-                except Exception:
-                    pass
-        except Exception as e:
-            self._log("error", f"USB 桥接失败: {e}")
+        """为指定 udid 建立视频 TCP 桥接 + 音频 TCP 桥接。
+
+        音频必须走 TCP：usbmuxd 只转发 TCP，不转发 UDP。此前仅桥接视频，
+        导致 USB 模式下麦克风采集到的数据永远到不了桌面端。
+        """
+        if udid not in self._bridges:
+            self._bridges[udid] = {}
+
+        if "tcp" not in self._bridges[udid]:
+            self._log("info",
+                      f"建立 USB 视频桥接 → {udid[:8]}... (TCP {self.tcp_port})")
+            bridge = UsbBridge(
+                udid, self.tcp_port, self.tcp_port,
+                on_state_change=lambda s: self._log("info", f"[{udid[:8]}] 视频桥接: {s}"))
+            try:
+                await bridge.start()
+                self._bridges[udid]["tcp"] = bridge
+                self._current_udid = udid
+            except Exception as e:
+                self._log("error", f"USB 视频桥接失败: {e}")
+
+        if self.audio_tcp_port and "audio" not in self._bridges[udid]:
+            self._log("info",
+                      f"建立 USB 音频桥接 → {udid[:8]}... (TCP {self.audio_tcp_port})")
+            audio_bridge = UsbBridge(
+                udid, self.audio_tcp_port, self.audio_tcp_port,
+                on_state_change=lambda s: self._log("info", f"[{udid[:8]}] 音频桥接: {s}"))
+            try:
+                await audio_bridge.start()
+                self._bridges[udid]["audio"] = audio_bridge
+            except Exception as e:
+                self._log("error", f"USB 音频桥接失败: {e}")
+
+        if self.on_devices_changed:
+            try:
+                await self.on_devices_changed(self.get_active_devices())
+            except Exception:
+                pass
 
     async def _monitor_loop(self):
         """周期性检测设备插拔。"""
@@ -303,6 +328,17 @@ class UsbBridgeManager:
                                 await self.on_devices_changed(self.get_active_devices())
                             except Exception:
                                 pass
+
+                # 新接入设备：自动建桥。此前只清理断开设备，导致"先开 USB 模式、
+                # 后插线"或中途换设备时始终连不上，必须重启应用。
+                for udid in sorted(current):
+                    if udid in self._bridges:
+                        continue
+                    # 端口是固定的，同一时刻只为一台设备建桥
+                    if self._current_udid is not None and self._current_udid != udid:
+                        continue
+                    self._log("info", f"检测到设备: {udid[:8]}...")
+                    await self._ensure_bridges(udid)
 
                 if self.on_devices_changed:
                     try:

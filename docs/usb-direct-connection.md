@@ -21,7 +21,7 @@ LAN 模式依赖 Wi-Fi，存在以下限制：
 │         ▲          │                │         ▲          │
 │         │          │   usbmuxd      │         │          │
 │  AudioStreamServer │   (USB 通道)   │  AudioStreamReceiver│
-│  (127.0.0.1:5001)  │ ─────────────► │  (127.0.0.1:5001)  │
+│  (127.0.0.1:5002)  │ ─────────────► │  (127.0.0.1:5002)  │
 │                    │                │                    │
 └────────────────────┘                └────────────────────┘
         iPhone                               PC
@@ -33,16 +33,20 @@ LAN 模式依赖 Wi-Fi，存在以下限制：
 
 **关键点**：
 - iOS App 与桌面端**都绑定 127.0.0.1**
-- pymobiledevice3 的 `TcpForwarder` 在两端建立 usbmuxd 端口转发
+- pymobiledevice3 的 `UsbmuxTcpForwarder` 在两端建立 usbmuxd 端口转发
 - 桌面端接收器重启绑定 `127.0.0.1`，避免 LAN 上的随机连接
 - **无需在桌面端配置任何网络**，无需 IP/端口
+- **音频端口是 5002 而非 5001**：usbmuxd 只转发 TCP，无法转发 UDP，
+  所以 USB 模式下 iOS 端改用 `AudioStreamServer.startServerTCP()` 监听 TCP 5002，
+  桌面端用 `AudioStreamReceiver.connect_tcp_client()` 连入。
+  帧格式与 UDP 完全一致（16B AUD1 头 + payload），只是改为按头分帧读取。
 
 ## 平台要求
 
 ### Windows
 - 安装 [iTunes](https://www.apple.com/itunes/) 或独立的 [Apple Mobile Device Support](https://support.apple.com/en-us/HT204095) (提供 usbmuxd 后端驱动)
 - `pymobiledevice3>=3.5.0`（纯 Python usbmuxd 客户端）
-- ⚠ Windows 防火墙首次可能需要允许 `python.exe` 监听 127.0.0.1:5000/5001
+- ⚠ Windows 防火墙首次可能需要允许 `python.exe` 监听 127.0.0.1:5000/5002
 
 ### macOS
 - 系统自带 usbmuxd
@@ -118,8 +122,12 @@ devs = await list_ios_devices()
 - `host_port`: PC 端监听端口
 - `device_port`: iOS 端目标端口
 
-### `usb.UsbBridgeManager(tcp_port, udp_port, on_state=None, on_devices_changed=None)`
+### `usb.UsbBridgeManager(tcp_port, udp_port, audio_tcp_port=5002, on_state=None, on_devices_changed=None)`
 统一管理多设备 + 自动重连。
+
+- `tcp_port`: 视频转发端口（默认 5000）
+- `audio_tcp_port`: 音频转发端口（默认 5002）。设为 0 可禁用音频桥接。
+- 监控循环每 2 秒检测设备插拔：新设备自动建桥，断开设备自动清理
 
 ## 安全考虑
 

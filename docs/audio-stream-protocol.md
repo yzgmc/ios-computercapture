@@ -50,6 +50,19 @@
 - 桌面端绑定 `0.0.0.0:5001`，使用 `asyncio.DatagramEndpoint` 接收
 - iOS 端配置桌面端 IP 与端口（与 TCP 视频通道共用 `rawStreamHost`）
 
+## TCP 模式（USB 直连 / 网页）
+
+**usbmuxd 只转发 TCP，不能转发 UDP**，因此以下场景改用 TCP 承载音频，
+帧格式完全不变，只是分帧方式不同：
+
+| 场景 | 端口 | 发送端 | 接收端 |
+|------|------|--------|--------|
+| USB 直连 | TCP 5002 | iOS `AudioStreamServer.startServerTCP()` | `AudioStreamReceiver.connect_tcp_client()` |
+| 网页模式 | WSS 8443 `/ws/audio` | 浏览器 AudioWorklet | `WebStreamReceiver` |
+
+TCP 是字节流，没有消息边界，接收方先读满 16B 帧头、再按 `payload_length`
+精确读取 payload；UDP 与 WebSocket 则一条消息即一包，天然保持边界。
+
 ## iOS 端发送流程
 
 1. `CaptureManager` 配置 `AVCaptureAudioDataOutput.audioSettings`：

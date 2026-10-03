@@ -16,21 +16,26 @@ try:
 except ImportError:  # srt_transport 导入失败（libsrt 缺失等）
     SRTStreamReceiver = None
 from audio_stream import AudioStreamReceiver, AudioPlayer
-from discovery import DiscoveryService
+from web import (
+    WebStreamReceiver, DEFAULT_WEB_PORT, is_web_available, web_import_error,
+)
+from discovery import DiscoveryService, DISCOVERY_PORT
 from usb import (
     UsbBridgeManager, is_usb_available, list_ios_devices,
-    USB_DEFAULT_TCP_PORT, USB_DEFAULT_UDP_PORT,
+    USB_DEFAULT_TCP_PORT, USB_DEFAULT_UDP_PORT, USB_DEFAULT_AUDIO_TCP_PORT,
 )
 
 logger = logging.getLogger(__name__)
 
 RAW_STREAM_PORT = 5000   # TCP/SRT 视频原画质
 AUDIO_STREAM_PORT = 5001  # UDP 音频
+WEB_HTTPS_PORT = DEFAULT_WEB_PORT  # 网页端 HTTPS（视频/音频均走 WebSocket）
 
 # 传输模式
 MODE_LAN = "lan"          # 通过 Wi-Fi / 局域网 TCP/UDP
 MODE_USB = "usb"          # 通过 USB + usbmuxd 桥接
 MODE_SRT = "srt"          # 通过 SRT 推流（公网/不稳定网络）
+MODE_WEB = "web"          # 网页浏览器通过 HTTPS + WebSocket 推流
 
 
 class PhoneCamApp(QObject):
@@ -47,11 +52,13 @@ class PhoneCamApp(QObject):
         self.window.usb_mode_requested.connect(self.enable_usb_mode)
         self.window.lan_mode_requested.connect(self.enable_lan_mode)
         self.window.srt_mode_requested.connect(self.enable_srt_mode)
+        self.window.web_mode_requested.connect(self.enable_web_mode)
 
         self.status_changed.connect(self.window.set_status)
 
         self.virtual_camera = VirtualCameraOutput()
-        self.discovery = None  # start() 中创建
+        # 局域网自动发现服务：在 start() 中实例化并监听 UDP 50000
+        self.discovery: DiscoveryService | None = None
 
         # UDP 音频播放器：默认输出到虚拟音频设备（VB-Cable），
         # 用户在 UI 中切换"启动虚拟麦克风"时 start/stop。
@@ -88,7 +95,11 @@ class PhoneCamApp(QObject):
         return self._mode
 
     def _emit_state(self, level: str, msg: str):
-        prefix = {"info": "[USB] ", "warn": "[USB] ⚠ ", "error": "[USB] ✗ "}.get(level, "[USB] ")
+        # 前缀跟随当前模式，避免 SRT / Web 模式的消息被误标成 [USB]
+        tag = {"lan": "[LAN]", "usb": "[USB]", "srt": "[SRT]", "web": "[WEB]"}.get(
+            self._mode, "[APP]")
+        prefix = {"info": f"{tag} ", "warn": f"{tag} ⚠ ", "error": f"{tag} ✗ "}.get(
+            level, f"{tag} ")
         self.status_changed.emit(prefix + msg)
         logger.log({"info": logging.INFO, "warn": logging.WARNING,
                     "error": logging.ERROR, "debug": logging.DEBUG}.get(level, logging.INFO),
@@ -100,6 +111,23 @@ class PhoneCamApp(QObject):
                 self.window.set_usb_devices(self.usb_devices, self._mode)
             except Exception as e:
                 logger.debug("set_usb_devices error: %s", e)
+
+    def _sync_virtual_camera_format(self, width: int, height: int):
+        """按实际收到的帧尺寸同步虚拟摄像头输出格式。
+
+        之前只在虚拟摄像头未启用时才改 width/height，导致"先启动虚拟摄像头、
+        后接入视频流"时输出分辨率停留在默认 720p，与真实帧不匹配。
+        update_format() 会在已启用时自动重启设备。
+        """
+        if width <= 0 or height <= 0:
+            return
+        if self.virtual_camera.width == width and self.virtual_camera.height == height:
+            return
+        try:
+            self.virtual_camera.update_format(width, height, self.virtual_camera.fps)
+            logger.info("Virtual camera format synced to %dx%d", width, height)
+        except Exception as e:
+            logger.warning("Virtual camera format sync failed: %s", e)
 
     def _on_raw_frame(self, raw: bytes, width: int, height: int,
                       pixel_format: int, bytes_per_row: int):
@@ -131,9 +159,7 @@ class PhoneCamApp(QObject):
                                 width, height, len(raw))
                     self._raw_first_frame_logged = True
                     self.window.set_actual_resolution(width, height)
-                    if not self.virtual_camera.enabled:
-                        self.virtual_camera.width = width
-                        self.virtual_camera.height = height
+                    self._sync_virtual_camera_format(width, height)
             elif pixel_format == PixelFormat.JPEG:
                 # JPEG 解码：raw 是 JPEG 字节流
                 try:
@@ -147,9 +173,7 @@ class PhoneCamApp(QObject):
                                 width, height, len(raw))
                     self._raw_first_frame_logged = True
                     self.window.set_actual_resolution(width, height)
-                    if not self.virtual_camera.enabled:
-                        self.virtual_camera.width = width
-                        self.virtual_camera.height = height
+                    self._sync_virtual_camera_format(width, height)
                 rgb = np.array(img)
             elif pixel_format == PixelFormat.BGRA:
                 expected = bytes_per_row * height
@@ -162,9 +186,7 @@ class PhoneCamApp(QObject):
                                 width, height, bytes_per_row, len(raw))
                     self._raw_first_frame_logged = True
                     self.window.set_actual_resolution(width, height)
-                    if not self.virtual_camera.enabled:
-                        self.virtual_camera.width = width
-                        self.virtual_camera.height = height
+                    self._sync_virtual_camera_format(width, height)
                 arr = np.frombuffer(raw[:expected], dtype=np.uint8)
                 stride_bytes = max(bytes_per_row, width * 4)
                 arr = arr.reshape(height, stride_bytes)[:, :width * 4].reshape(height, width, 4)
@@ -243,6 +265,23 @@ class PhoneCamApp(QObject):
             logger.error("Failed to start audio stream receiver: %s", e)
             self.status_changed.emit(f"音频端口 {AUDIO_STREAM_PORT} 启动失败: {e}")
 
+        # 3. 启动局域网自动发现（UDP 50000），应答 iPhone 端的"搜索桌面端"。
+        #    DiscoveryService 之前只在 __init__ 里声明为 None 却从未实例化，
+        #    导致 iOS 端 DiscoveryClient 的广播永远等不到回包。
+        try:
+            self.discovery = DiscoveryService(
+                host_ip=local_ip,
+                tcp_port=RAW_STREAM_PORT,
+                udp_port=AUDIO_STREAM_PORT,
+            )
+            await self.discovery.start()
+            logger.info("Discovery service started on UDP %d", DISCOVERY_PORT)
+        except Exception as e:
+            # 端口被占用等问题不应影响主流程，降级为手动填 IP
+            logger.warning("Failed to start discovery service: %s", e)
+            self.discovery = None
+            self.status_changed.emit("自动发现未启动（端口占用），请手动填写 IP")
+
     @asyncSlot()
     async def enable_usb_mode(self):
         """用户点击"切换到 USB 模式"：建桥接，等待 iPhone USB 接入。
@@ -261,6 +300,7 @@ class PhoneCamApp(QObject):
             self.usb_manager = UsbBridgeManager(
                 tcp_port=RAW_STREAM_PORT,
                 udp_port=AUDIO_STREAM_PORT,
+                audio_tcp_port=USB_DEFAULT_AUDIO_TCP_PORT,
                 on_state=lambda lvl, msg: self._emit_state(lvl, msg),
                 on_devices_changed=self._on_usb_devices_changed,
             )
@@ -319,9 +359,50 @@ class PhoneCamApp(QObject):
         await self._restart_receivers(listen_host="0.0.0.0", use_srt=True)
         self._emit_devices()
 
+    @asyncSlot()
+    async def enable_web_mode(self):
+        """用户切换到网页模式：启动 HTTPS 站点，等待浏览器推流。
+
+        任意设备（iPhone Safari / Android Chrome / 另一台电脑）用浏览器打开
+        https://<本机IP>:8443 即可采集摄像头与麦克风推过来，无需安装 App。
+        """
+        if self._mode == MODE_WEB:
+            return
+        if not is_web_available():
+            self.status_changed.emit(
+                f"网页模式不可用：{web_import_error()}；请执行 pip install aiohttp")
+            self._emit_devices()
+            return
+        self._mode = MODE_WEB
+        self._emit_state("info", "切换到网页模式 (HTTPS)")
+        if self.usb_manager:
+            await self.usb_manager.stop()
+        await self._restart_receivers(listen_host="0.0.0.0", use_web=True)
+        self._emit_devices()
+
+    def _on_web_client(self):
+        """网页客户端接入：重置 H.264 解码器，等下一个 IDR 重新同步。"""
+        if self._h264_decoder is not None:
+            try:
+                self._h264_decoder.reset()
+            except Exception as e:
+                logger.warning("H264 decoder reset on web client failed: %s", e)
+
+    def _on_web_disconnect(self):
+        """网页客户端断开：站点继续监听，等待下一个客户端。"""
+        if self._mode != MODE_WEB:
+            return
+        self._emit_state("warn", "网页客户端断开，等待重新连接…")
+        if self._h264_decoder is not None:
+            try:
+                self._h264_decoder.reset()
+            except Exception as e:
+                logger.warning("H264 decoder reset on web disconnect failed: %s", e)
+
     async def _restart_receivers(self, listen_host: str,
                                  use_tcp_client: bool = False,
-                                 use_srt: bool = False):
+                                 use_srt: bool = False,
+                                 use_web: bool = False):
         """重启接收器，绑定到 listen_host。
 
         :param use_tcp_client: True=USB 模式，raw_receiver 作为 TCP 客户端
@@ -329,6 +410,8 @@ class PhoneCamApp(QObject):
             False=LAN 模式，raw_receiver 作为 TCP 服务器监听。
         :param use_srt: True=SRT 模式，使用 SRTStreamReceiver 替代 RawStreamReceiver；
             iOS 端为 caller 主动连接桌面 listener。
+        :param use_web: True=网页模式，使用 WebStreamReceiver 起 HTTPS 站点；
+            视频与音频都走 WebSocket，不启动独立 UDP 音频接收器。
         """
         try:
             await self.raw_receiver.stop()
@@ -338,7 +421,36 @@ class PhoneCamApp(QObject):
             await self.audio_receiver.stop()
         except Exception:
             pass
-        if use_srt:
+        if use_web:
+            # 网页模式：HTTPS 站点承载页面与两条 WebSocket 通道。
+            # 视频与音频都走 WebSocket，不再占用 TCP 5000 / UDP 5001。
+            try:
+                self.raw_receiver = WebStreamReceiver(
+                    host=listen_host, port=WEB_HTTPS_PORT,
+                    on_frame=self._on_raw_frame,
+                    on_audio_packet=self._on_audio_packet,
+                    on_client=self._on_web_client,
+                    on_disconnect=self._on_web_disconnect,
+                    on_state=lambda lvl, msg: self._emit_state(lvl, msg),
+                )
+            except Exception as e:
+                self._emit_state("error", f"网页接收器初始化失败: {e}")
+                return
+            self.audio_receiver = None
+            try:
+                await self.raw_receiver.start()
+            except Exception as e:
+                self._emit_state("error", f"网页服务启动失败: {e}")
+                self._mode = MODE_LAN
+                return
+            # 把访问地址与证书指纹回显到界面，方便用手机扫码/手输
+            if hasattr(self.window, "set_web_address"):
+                ips = [ip for ip in getattr(self.raw_receiver, "_local_ips", [])
+                       if ip != "127.0.0.1"]
+                self.window.set_web_address(
+                    ips, WEB_HTTPS_PORT,
+                    getattr(self.raw_receiver, "fingerprint", None))
+        elif use_srt:
             # SRT 模式：listener 等待 iOS caller
             try:
                 self.raw_receiver = SRTStreamReceiver(
@@ -391,10 +503,33 @@ class PhoneCamApp(QObject):
                     await self.raw_receiver.start()
                 except Exception as e:
                     self._emit_state("error", f"重启 TCP 接收器失败: {e}")
-        try:
-            await self.audio_receiver.start()
-        except Exception as e:
-            self._emit_state("error", f"重启 UDP 接收器失败: {e}")
+        if use_web:
+            # 音频已在 WebSocket 通道里，无需独立接收器
+            pass
+        elif use_tcp_client:
+            # USB 模式：音频走 TCP 5002 桥接（usbmuxd 只转发 TCP，不转发 UDP）。
+            # 视频通道已经重试等待过 forwarder，这里通常一次就连上。
+            connected = False
+            for attempt in range(15):
+                try:
+                    await self.audio_receiver.connect_tcp_client(
+                        "127.0.0.1", USB_DEFAULT_AUDIO_TCP_PORT)
+                    connected = True
+                    self._emit_state("info", "USB 音频通道已连接")
+                    break
+                except (ConnectionError, OSError):
+                    await asyncio.sleep(0.5)
+                except Exception as e:
+                    self._emit_state("warn", f"USB 音频连接异常: {e}")
+                    break
+            if not connected:
+                # 视频不受影响，只提示音频不可用
+                self._emit_state("warn", "USB 音频桥接未就绪（视频不受影响）")
+        else:
+            try:
+                await self.audio_receiver.start()
+            except Exception as e:
+                self._emit_state("error", f"重启 UDP 接收器失败: {e}")
         self._listen_host = listen_host
 
     def _on_srt_disconnect(self):

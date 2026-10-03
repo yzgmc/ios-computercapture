@@ -1,5 +1,10 @@
 # USB 连接支持（基于 Tethering 网络）
 
+> **已废弃 / 历史方案**：本文描述的 USB tethering 方案已不再参与主流程。
+> 现在的 USB 直连通过 **usbmuxd 端口转发** 实现，无需开启个人热点，
+> 详见 [usb-direct-connection.md](usb-direct-connection.md)。
+> `device_detector.py` 与 `tethering_discovery.py` 保留但未被主流程调用。
+
 ## 背景与约束
 
 iOS 在未越狱状态下，**无法在 USB 上启动自定义服务**。第三方 App 没有权限直接

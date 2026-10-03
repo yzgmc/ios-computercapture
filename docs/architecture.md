@@ -3,73 +3,125 @@
 ## 系统概览
 
 ```
-┌─────────────────┐   TCP 5000 (BGRA 无压缩视频)   ┌──────────────────────┐
-│   iPhone 设备    │ ────────────────────────────► │     电脑端应用        │
-│  (PhoneCam App) │   UDP 5001 (PCM 无压缩音频)   │ (Python + PyQt6)     │
-└─────────────────┘ ────────────────────────────► └──────────────────────┘
+┌──────────────────┐                                ┌──────────────────────┐
+│    采集端          │      视频 (RAW1 28B 头)        │     电脑端应用        │
+│  iOS App 或浏览器  │ ─────────────────────────────► │ (Python + PyQt6)     │
+│                   │      音频 (AUD1 16B 头)        │                      │
+└──────────────────┘ ─────────────────────────────► └──────────────────────┘
         │                                            │
-        │ 捕获视频 (AVCaptureSession · BGRA)          │ 预览渲染 (Qt)
-        │ 捕获音频 (AVCaptureSession · PCM16)         │ 虚拟摄像头 (pyvirtualcam)
-        │                                            │ 虚拟麦克风 (PyAudio)
-        ▼                                            ▼
-┌─────────────────┐                          ┌──────────────────────┐
-│   局域网 Wi-Fi   │                          │  其他电脑应用         │
-│  /有线网络       │                          │ Zoom / OBS / Teams   │
-└─────────────────┘                          └──────────────────────┘
+        │ 视频：H.264 硬编 / JPEG / BGRA               │ 分帧 → 解码 → Qt 预览
+        │ 音频：48kHz mono PCM16                      │ 虚拟摄像头 (pyvirtualcam)
+        ▼                                            ▼ 虚拟麦克风 (PyAudio)
+┌──────────────────┐                          ┌──────────────────────┐
+│  传输通道          │                          │  其他电脑应用         │
+│ LAN/USB/SRT/HTTPS │                          │ Zoom / OBS / Teams   │
+└──────────────────┘                          └──────────────────────┘
 ```
 
 ## 数据流
 
-1. **iOS 端** 使用 `AVCaptureSession` 捕获：
-   - 摄像头 → `AVCaptureVideoDataOutput`（BGRA 32-bit）
-   - 麦克风 → `AVCaptureAudioDataOutput`（48kHz / mono / 16-bit PCM）
-2. **视频** 通过 `RawStreamServer` 整帧写入 TCP 5000 端口（28B 帧头 + BGRA payload）
-3. **音频** 通过 `AudioStreamServer` 切片写入 UDP 5001 端口（16B 帧头 + PCM payload）
-4. **电脑端** 监听两个端口：
-   - `RawStreamReceiver`（asyncio TCP server）按帧头精确读取整帧
-   - `AudioStreamReceiver`（asyncio UDP endpoint）按数据报接收音频包
-5. 视频帧通过 Qt 信号转发到主线程渲染，同时送 `VirtualCameraOutput` 输出到虚拟摄像头
-6. 音频包送 `AudioPlayer`，由 PyAudio 回调式输出到虚拟音频设备（VB-Cable / BlackHole）
+1. **采集端** 采集视频与音频：
+   - iOS：`AVCaptureSession` → BGRA 像素 + PCM 采样
+   - 浏览器：`getUserMedia` → VideoFrame + AudioWorklet Float32
+2. **视频编码**（三选一，运行期可切换）：
+   - H.264：iOS 用 `VTCompressionSession`，浏览器用 WebCodecs `VideoEncoder`
+   - JPEG：ImageIO / canvas `toBlob`，约 15–20 Mbps
+   - BGRA：原始像素，仅千兆有线可用
+3. **封装**：加 28B RAW1 头（音频加 16B AUD1 头），大端序
+4. **传输**：LAN=TCP、USB=TCP over usbmuxd、SRT=SRT 消息、网页=WebSocket
+5. **桌面端解析**：按帧头精确分帧 → H.264 用 PyAV 解码 / JPEG 用 PIL / BGRA 用 numpy
+6. **输出**：Qt 信号转发主线程渲染，同时送虚拟摄像头与 PyAudio 虚拟麦克风
 
-## 连接方式
+## 四种连接方式
 
-### Wi-Fi 连接（默认）
-- iPhone 和电脑在同一局域网
-- 桌面端启动后监听 `0.0.0.0:5000`（TCP 视频）和 `0.0.0.0:5001`（UDP 音频）
-- iPhone 在 UI 中填写桌面端 IP，点击「开始共享」即可建立连接
+### 1. 局域网（LAN）
+
+- iOS App 作为 TCP caller 主动连接桌面端 `0.0.0.0:5000`
+- 音频走 UDP `:5001`
 - Windows 防火墙需放行 TCP 5000 + UDP 5001 入站
+- 桌面端监听 UDP 50000 应答广播，iOS 端可自动发现电脑 IP
 
-### USB 连接（未来扩展）
-- 通过 `usbmuxd` / `libimobiledevice` 建立 TCP over USB 隧道
-- 桌面端在 localhost 上监听，iPhone 通过 USB 端口转发访问
+### 2. USB 直连
 
-## 安全性
+方向与其他模式相反：
 
-- 当前协议为明文无压缩传输，**仅适用于可信局域网**
-- 无鉴权 / 加密；如需在不可信网络使用，建议在 VPN 或加密隧道内运行
-- UDP 音频不保证可靠性，丢包由桌面端播放器自然吸收
+```
+桌面 TCP client → PC 127.0.0.1:5000 → usbmuxd → iOS 127.0.0.1:5000 → iOS NWListener
+桌面 TCP client → PC 127.0.0.1:5002 → usbmuxd → iOS 127.0.0.1:5002 → iOS NWListener(音频)
+```
+
+- 由 `pymobiledevice3` 的 `UsbmuxTcpForwarder` 建立转发
+- **usbmuxd 只转发 TCP**，因此 USB 模式音频必须走 TCP 5002，不能用 UDP 5001
+- 设备插拔由 `UsbBridgeManager` 监控，自动建桥与清理；视频通道断开后 60 秒内自动重连
+
+### 3. SRT 推流
+
+- 桌面端为 listener，iOS 端为 caller 主动连接
+- LIVE + 消息 API：每帧作为一条 SRT 消息发送，天然保持帧边界
+- 延迟 120ms，支持 `SRTO_TLPKTDROP` 丢包保护，适合公网/弱网
+- 桌面端用 ctypes 直连 libsrt，无需 pip 安装
+
+### 4. 网页（HTTPS + WebSocket）
+
+```
+浏览器 getUserMedia → WebCodecs H.264 → wss://host:8443/ws/video
+                    → AudioWorklet PCM16 → wss://host:8443/ws/audio
+```
+
+- 浏览器只在安全上下文授权摄像头，局域网 IP 必须 HTTPS，故使用自签证书
+- 协议与 iOS 端完全一致，桌面端解码链路零改动
+- 无 WebCodecs 时自动降级为 JPEG 抓帧，再降级为 BGRA
+
+详见 [web-mode.md](web-mode.md)。
+
+## 自适应码率
+
+采集端根据两项观测决定码率乘数，取较小值应用到编码器：
+
+| 观测 | idle/light | medium | heavy / serious | critical |
+|------|-----------|--------|-----------------|----------|
+| 发送背压（在途帧数 / 发送缓冲） | 1.0x | 0.7x | 0.4x | — |
+| 设备热状态 | 1.0x | — | 0.7x | 0.5x |
+
+- 在途帧上限 3 帧：60fps 每帧 16.7ms，TCP 发送完成典型 20–30ms，
+  只允许 1 帧在途会把帧率卡在 30fps 左右
+- SRT 模式下背压有两路来源（本地在途帧数 + `SRTO_SNDDATA` 未确认字节），
+  分别记录后取合成值，避免两套机制互相覆盖造成码率抖动
+- 目标码率 = `width × height × fps × bpp`，bpp 由画质预设决定（0.05 / 0.10 / 0.15），
+  钳制在 1–25 Mbps
+
+## 断线自愈
+
+H.264 有帧间依赖，断流后解码器会花屏。项目在以下时机强制 IDR 关键帧并重置解码器：
+
+- 起流首帧
+- 客户端（重）连接
+- 分辨率 / 画质预设切换（会重建 `VTCompressionSession`）
+- 桌面端检测到连接断开后重连成功
+
+同时关闭 OpenGOP，保证每个关键帧都是 IDR，不依赖前向参考即可重新同步。
 
 ## 性能参考
 
-### 视频带宽（TCP 净载荷）
+### 视频带宽
 
-| 分辨率   | 帧率 | 单帧大小 (BGRA) | 估算码率 |
-|----------|------|-----------------|----------|
-| 720p     | 30   | 1280×720×4 ≈ 3.5MB | ≈ 265 Mbps |
-| 1080p    | 30   | 1920×1080×4 ≈ 7.9MB | ≈ 566 Mbps |
-| 720p     | 60   | 3.5MB            | ≈ 530 Mbps |
+| 编码 | 分辨率 | 帧率 | 估算码率 |
+|------|--------|------|----------|
+| H.264 (medium) | 1080p | 60 | ≈ 12 Mbps |
+| H.264 (low) | 1080p | 60 | ≈ 6 Mbps |
+| JPEG 75 | 1080p | 30 | ≈ 15–20 Mbps |
+| BGRA | 1080p | 60 | ≈ 500 Mbps |
+| BGRA | 720p | 30 | ≈ 265 Mbps |
 
-> 仅在千兆及以上有线/802.11ac Wi-Fi 网络下可用。
-
-### 音频带宽（UDP 净载荷）
+### 音频带宽
 
 | 配置 | 单包大小 | 估算码率 |
 |------|----------|----------|
-| 48kHz / mono / 16-bit | ~1456B / 15ms | ≈ 768 kbps |
+| 48kHz / mono / 16-bit | ≤1456B | ≈ 768 kbps |
 
-## 低延迟优化
+## 安全性
 
-- 视频无编解码：采集到的 BGRA 像素直接整帧写入 TCP，由内核保证可靠性
-- 音频无编解码：采集到的 PCM 直接切片写入 UDP，应用层不做重传
-- 接收方读到完整一帧立即回调，不做帧缓冲对齐
-- 队列满时丢最旧帧，保持实时性
+- 协议明文、无鉴权，**仅适用于可信局域网**
+- 网页模式自签证书需用户手动信任，桌面端显示 SHA-256 指纹供核对
+- 不可信网络请置于 VPN 或加密隧道内
+- UDP 音频不保证可靠性，丢包由播放器的静音填充自然吸收

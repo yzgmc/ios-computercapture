@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#111111">
+<title>PhoneCam 网页端</title>
+<style>
+  :root {
+    --bg: #111111;
+    --card: #1c1c1e;
+    --border: #2c2c2e;
+    --text: #f2f2f7;
+    --muted: #98989f;
+    --accent: #0a84ff;
+    --danger: #ff453a;
+    --ok: #30d158;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0; padding: 16px; background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Microsoft YaHei", sans-serif;
+    max-width: 720px; margin-inline: auto;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; font-weight: 600; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 14px; padding: 14px; margin-bottom: 12px;
+  }
+  .card h2 {
+    font-size: 14px; margin: 0 0 10px; font-weight: 600;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .row:last-child { margin-bottom: 0; }
+  .row label { flex: 0 0 88px; color: var(--muted); font-size: 14px; }
+  select, input {
+    flex: 1; background: #2c2c2e; color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 10px; font-size: 15px; min-width: 0;
+  }
+  video {
+    width: 100%; border-radius: 10px; background: #000; display: block;
+    aspect-ratio: 16 / 9; object-fit: contain;
+  }
+  button {
+    width: 100%; padding: 15px; border: none; border-radius: 12px;
+    font-size: 17px; font-weight: 600; color: #fff; background: var(--accent);
+  }
+  button.stop { background: var(--danger); }
+  button:disabled { opacity: .45; }
+  .status { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.on { background: var(--ok); }
+  .dot.err { background: var(--danger); }
+  .stats {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
+    font-size: 13px; color: var(--muted);
+  }
+  .stats b { display: block; color: var(--text); font-size: 17px; font-weight: 600;
+             font-variant-numeric: tabular-nums; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  .warn {
+    background: rgba(255,159,10,.12); border: 1px solid rgba(255,159,10,.35);
+    color: #ffd60a; border-radius: 10px; padding: 10px; font-size: 13px;
+  }
+</style>
+</head>
+<body>
+
+<h1>PhoneCam 网页端</h1>
+<p class="sub">用浏览器把本机摄像头与麦克风实时推送到电脑</p>
+
+<div id="capWarn" class="card warn" style="display:none"></div>
+
+<div class="card">
+  <h2>连接</h2>
+  <div class="row">
+    <label>电脑地址</label>
+    <input id="host" placeholder="192.168.1.100" inputmode="url">
+  </div>
+  <div class="row">
+    <label>端口</label>
+    <input id="port" value="8443" inputmode="numeric">
+  </div>
+  <div class="hint">地址默认已填入本机地址，一般无需修改。</div>
+</div>
+
+<div class="card">
+  <h2>采集参数</h2>
+  <div class="row">
+    <label>分辨率</label>
+    <select id="resolution">
+      <option value="3840">4K 2160p</option>
+      <option value="1440">2K 1440p</option>
+      <option value="1080" selected>1080p</option>
+      <option value="720">720p</option>
+      <option value="480">480p</option>
+      <option value="240">240p</option>
+    </select>
+  </div>
+  <div class="row">
+    <label>帧率</label>
+    <select id="fps">
+      <option value="60">60 fps</option>
+      <option value="30" selected>30 fps</option>
+      <option value="24">24 fps</option>
+      <option value="15">15 fps</option>
+    </select>
+  </div>
+  <div class="row">
+    <label>摄像头</label>
+    <select id="facing">
+      <option value="user" selected>前置</option>
+      <option value="environment">后置</option>
+    </select>
+  </div>
+  <div class="row">
+    <label>编码</label>
+    <select id="codec">
+      <option value="auto" selected>自动（H.264 优先）</option>
+      <option value="h264">H.264（WebCodecs）</option>
+      <option value="jpeg">JPEG 抓帧</option>
+      <option value="bgra">BGRA 原始</option>
+    </select>
+  </div>
+  <div class="row">
+    <label>麦克风</label>
+    <select id="audio">
+      <option value="1" selected>开启</option>
+      <option value="0">关闭</option>
+    </select>
+  </div>
+</div>
+
+<div class="card">
+  <video id="preview" autoplay muted playsinline></video>
+</div>
+
+<div class="card">
+  <div class="status"><span class="dot" id="dot"></span><span id="status">未连接</span></div>
+  <div class="stats" style="margin-top:12px">
+    <div>帧率<b id="statFps">0</b></div>
+    <div>码率<b id="statBw">0</b></div>
+    <div>丢帧<b id="statDrop">0</b></div>
+  </div>
+</div>
+
+<button id="toggle">开始共享</button>
+<p class="hint" id="tip">
+  首次访问自签证书会提示"不安全"，选择继续即可。共享期间请保持此页面在前台。
+</p>
+
+<script src="app.js"></script>
+</body>
+</html>

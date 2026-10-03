@@ -30,6 +30,12 @@ def main():
         "--collect-all", "PyQt6",
     ]
 
+    # 网页模式的静态资源不是通过 import 引用，而是按文件路径读取，
+    # 必须显式打包，否则打包后 HTTPS 页面打不开。
+    static_src = os.path.join("src", "web", "static")
+    if os.path.isdir(static_src):
+        args += ["--add-data", static_src + os.pathsep + os.path.join("web", "static")]
+
     sys.argv = ["pyinstaller"] + args
     PyInstaller.__main__.run()
 

@@ -38,7 +38,15 @@ final class SRTStreamServer: VideoStreamTransport {
     private var pendingFrameCount = 0
     private let maxPendingFrames = 3
     private let pendingLock = NSLock()
-    private var lastBackpressureLevel: BackpressureLevel = .idle
+
+    // 背压分两路独立观测，合并后再上报：
+    // - pendingLevel：本地在途帧数（tryAcquirePendingSlot / _decrementPending 维护）
+    // - snddataLevel：SRT 发送缓冲未确认字节数（定时器轮询 SRTO_SNDDATA）
+    // 早期实现让两者共用 lastBackpressureLevel，互相覆盖会导致等级反复横跳、
+    // 码率被反复拉扯。现在取两者较大值，只有合成结果变化时才回调。
+    private var pendingLevel: BackpressureLevel = .idle
+    private var snddataLevel: BackpressureLevel = .idle
+    private var reportedLevel: BackpressureLevel = .idle
 
     /// 背压等级变化回调（在 queue 上调用）。
     var onBackpressure: ((BackpressureLevel) -> Void)?
@@ -152,7 +160,9 @@ final class SRTStreamServer: VideoStreamTransport {
         frameID = 0
         pendingLock.lock()
         pendingFrameCount = 0
-        lastBackpressureLevel = .idle
+        pendingLevel = .idle
+        snddataLevel = .idle
+        reportedLevel = .idle
         pendingLock.unlock()
         // 不调用 srt_cleanup()：它是全局引用计数，进程退出时由 OS 回收
     }
@@ -322,12 +332,24 @@ final class SRTStreamServer: VideoStreamTransport {
         } else {
             newLevel = .heavy
         }
-        let oldLevel = lastBackpressureLevel
-        lastBackpressureLevel = newLevel
-        if newLevel != oldLevel {
-            print("SRTStream: backpressure=\(newLevel.rawValue) (snddata=\(snddata)B)")
-            onBackpressure?(newLevel)
-        }
+        // 只更新 snddata 这一路观测，是否上报交给 _publishBackpressure 决定
+        guard newLevel != snddataLevel else { return }
+        snddataLevel = newLevel
+        print("SRTStream: snddata level=\(newLevel.rawValue) (snddata=\(snddata)B)")
+        _publishBackpressure()
+    }
+
+    /// 合并 pending 与 snddata 两路观测，仅在合成等级变化时回调上层。
+    ///
+    /// 早期实现让两个来源共用同一个 lastBackpressureLevel，互相覆盖会造成
+    /// 等级反复横跳（pending 刚降下来又被 snddata 抬回去），码率被来回拉扯。
+    private func _publishBackpressure() {
+        let combined = BackpressureLevel(
+            rawValue: max(pendingLevel.rawValue, snddataLevel.rawValue)) ?? .idle
+        guard combined != reportedLevel else { return }
+        reportedLevel = combined
+        print("SRTStream: backpressure=\(combined.rawValue) (pending=\(pendingLevel.rawValue), snddata=\(snddataLevel.rawValue))")
+        onBackpressure?(combined)
     }
 
     private func tryAcquirePendingSlot() -> Bool {
@@ -339,25 +361,21 @@ final class SRTStreamServer: VideoStreamTransport {
         }
         pendingFrameCount += 1
         let newLevel = BackpressureLevel(rawValue: min(pendingFrameCount, maxPendingFrames)) ?? .idle
-        let oldLevel = lastBackpressureLevel
-        lastBackpressureLevel = newLevel
+        let changed = newLevel != pendingLevel
+        pendingLevel = newLevel
         pendingLock.unlock()
-        if newLevel != oldLevel {
-            onBackpressure?(newLevel)
-        }
+        if changed { _publishBackpressure() }
         return true
     }
 
     private func _decrementPending() {
         pendingLock.lock()
-        pendingFrameCount -= 1
+        pendingFrameCount = max(0, pendingFrameCount - 1)
         let newLevel = BackpressureLevel(rawValue: min(pendingFrameCount, maxPendingFrames)) ?? .idle
-        let oldLevel = lastBackpressureLevel
-        lastBackpressureLevel = newLevel
+        let changed = newLevel != pendingLevel
+        pendingLevel = newLevel
         pendingLock.unlock()
-        if newLevel != oldLevel {
-            onBackpressure?(newLevel)
-        }
+        if changed { _publishBackpressure() }
     }
 
     private func send(_ data: Data) {

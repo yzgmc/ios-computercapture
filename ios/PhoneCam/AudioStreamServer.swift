@@ -27,9 +27,15 @@ final class AudioStreamServer {
     }
 
     private var connection: NWConnection?
+    /// USB 直连模式下作为 TCP 服务器监听（usbmuxd 只能转发 TCP，不能转发 UDP）
+    private var listener: NWListener?
+    private var isTCP = false
     private let queue = DispatchQueue(label: "com.yzg.phonecam.audiostream")
     private var seq: UInt32 = 0
     private(set) var isRunning = false
+
+    /// USB 模式下音频使用的 TCP 端口（独立于 UDP 5001，由桌面端 usbmuxd 桥接访问）
+    static let usbTcpPort: UInt16 = 5002
 
     /// 实际采集参数（由 CMSampleBuffer 动态检测后更新，桌面端据此配置 PyAudio 流）
     private var sampleRate: UInt32 = 48000
@@ -62,11 +68,69 @@ final class AudioStreamServer {
         }
         conn.start(queue: queue)
         connection = conn
+        isTCP = false
+    }
+
+    /// USB 直连模式：作为 TCP 服务器监听 port，等待桌面端通过 usbmuxd 桥接访问。
+    ///
+    /// 为什么需要 TCP 通道：usbmuxd 的端口转发只支持 TCP。USB 模式下若沿用 UDP，
+    /// iOS 端只能发往 127.0.0.1（自身回环），桌面端永远收不到音频。
+    /// 帧格式与 UDP 完全一致（16B AUD1 头 + payload），接收方按 payload_length 分帧。
+    func startServerTCP(port: UInt16, onReady: ((Bool) -> Void)? = nil) {
+        guard !isRunning else {
+            print("AudioStream: startServerTCP() ignored, already running")
+            onReady?(true)
+            return
+        }
+        do {
+            let params = NWParameters.tcp
+            let listener = try NWListener(using: params,
+                                          on: NWEndpoint.Port(integerLiteral: port))
+            var isFirstReady = true
+            listener.stateUpdateHandler = { [weak self] state in
+                switch state {
+                case .ready:
+                    print("AudioStream TCP listener: ready on :\(port)")
+                    self?.isRunning = true
+                    if isFirstReady {
+                        isFirstReady = false
+                        onReady?(true)
+                    }
+                case .failed(let err):
+                    print("AudioStream TCP listener: failed (\(err))")
+                    self?.isRunning = false
+                    onReady?(false)
+                case .cancelled:
+                    self?.isRunning = false
+                default:
+                    break
+                }
+            }
+            listener.newConnectionHandler = { [weak self] conn in
+                print("AudioStream TCP listener: accepted connection")
+                self?.connection = conn
+                conn.stateUpdateHandler = { [weak self] state in
+                    if case .ready = state {
+                        self?.isRunning = true
+                    }
+                }
+                conn.start(queue: self?.queue ?? .global())
+            }
+            listener.start(queue: queue)
+            self.listener = listener
+            isTCP = true
+        } catch {
+            print("AudioStream TCP listener: create failed (\(error))")
+            onReady?(false)
+        }
     }
 
     func stop() {
         connection?.cancel()
         connection = nil
+        listener?.cancel()
+        listener = nil
+        isTCP = false
         isRunning = false
         seq = 0
     }

@@ -346,7 +346,9 @@ struct ContentView: View {
                         .disableAutocorrection(true)
                         .disabled(isSharing)
                 }
-                Text("格式：48kHz / mono / 16-bit PCM。UDP 不可靠，丢包会产生短暂跳变。")
+                Text(transportMode == "usb"
+                     ? "格式：48kHz / mono / 16-bit PCM。USB 模式音频走 TCP 5002（usbmuxd 不转发 UDP）。"
+                     : "格式：48kHz / mono / 16-bit PCM。UDP 不可靠，丢包会产生短暂跳变。")
                     .font(.caption)
                     .foregroundStyle(Color.secondaryText)
             }
@@ -452,12 +454,22 @@ struct ContentView: View {
                     }
                 }
             }
-            if audioStreamEnabled, let port = UInt16(audioStreamPort) {
+            if audioStreamEnabled {
                 captureManager.audioStreamServer = audioStreamServer
-                // 音频 UDP 在 LAN/SRT 模式下连接桌面端；USB 模式走 127.0.0.1 桥接
-                let effectiveHost = isUSB ? "127.0.0.1" : rawStreamHost
-                audioStreamServer.start(host: effectiveHost, port: port) { ready in
-                    udpReady = ready
+                if isUSB {
+                    // USB：iOS 端监听 TCP 5002，桌面端经 usbmuxd 桥接连入。
+                    // usbmuxd 只转发 TCP，所以 USB 模式下音频不能走 UDP，
+                    // 否则会发往 iPhone 自己的 127.0.0.1 而永远到不了电脑。
+                    let tcpPort = AudioStreamServer.usbTcpPort
+                    await MainActor.run { statusMessage = "USB 音频监听中 :\(tcpPort)…" }
+                    audioStreamServer.startServerTCP(port: tcpPort) { ready in
+                        udpReady = ready
+                    }
+                } else if let port = UInt16(audioStreamPort) {
+                    // LAN / SRT：UDP 直连桌面端
+                    audioStreamServer.start(host: rawStreamHost, port: port) { ready in
+                        udpReady = ready
+                    }
                 }
             }
             // 等待 TCP/SRT 真正 ready（最多 5 秒），再启动 capture
@@ -487,7 +499,8 @@ struct ContentView: View {
                 if isUSB { mode = "USB" }
                 else if isSRT { mode = "SRT→\(rawStreamHost)" }
                 else { mode = rawStreamHost }
-                statusMessage = "已连接 → \(mode):\(rawStreamPort)/\(audioStreamPort)"
+                let audioPortText = isUSB ? String(AudioStreamServer.usbTcpPort) : audioStreamPort
+                statusMessage = "已连接 → \(mode):\(rawStreamPort)/\(audioPortText)"
             }
         }
     }

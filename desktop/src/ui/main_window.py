@@ -24,6 +24,7 @@ class MainWindow(QMainWindow):
     usb_mode_requested = pyqtSignal()  # 请求切换到 USB 模式
     lan_mode_requested = pyqtSignal()  # 请求切换到 LAN 模式
     srt_mode_requested = pyqtSignal()  # 请求切换到 SRT 推流模式
+    web_mode_requested = pyqtSignal()  # 请求切换到网页模式（HTTPS + WebSocket）
 
     def __init__(self):
         super().__init__()
@@ -43,7 +44,9 @@ class MainWindow(QMainWindow):
         info_layout = QHBoxLayout(info_group)
         info_layout.addWidget(QLabel("模式："))
         self.mode_combo = QComboBox()
-        self.mode_combo.addItems(["局域网 (LAN)", "USB 直连 (USB)", "SRT 推流 (SRT)"])
+        self.mode_combo.addItems([
+            "局域网 (LAN)", "USB 直连 (USB)", "SRT 推流 (SRT)", "网页 (HTTPS)",
+        ])
         info_layout.addWidget(self.mode_combo)
         self.usb_status_label = QLabel("未连接")
         self.usb_status_label.setStyleSheet("color: #888;")
@@ -166,11 +169,37 @@ class MainWindow(QMainWindow):
             self.usb_mode_requested.emit()
         elif idx == 2:
             self.srt_mode_requested.emit()
+        elif idx == 3:
+            self.web_mode_requested.emit()
         else:
             self.lan_mode_requested.emit()
 
+    def set_web_address(self, ips: list, port: int, fingerprint: str | None = None):
+        """网页模式下显示访问地址（供手机浏览器打开）。"""
+        if ips:
+            urls = " ".join(f"https://{ip}:{port}" for ip in ips)
+            self.server_input.setText(urls)
+            self.server_input.setToolTip(
+                "用手机浏览器打开该地址；首次访问需信任自签证书。"
+                + (f"\n证书 SHA-256 指纹：{fingerprint}" if fingerprint else ""))
+        else:
+            self.server_input.setText(f"https://<本机IP>:{port}")
+        if fingerprint:
+            self.usb_status_label.setText(f"网页端监听中 · 指纹 {fingerprint[:19]}…")
+        else:
+            self.usb_status_label.setText("网页端监听中")
+        self.usb_status_label.setStyleSheet("color: #00aa66;")
+
     def set_usb_devices(self, devices: list, current_mode: str):
-        """更新 USB / SRT 设备状态显示。"""
+        """更新 USB / SRT / 网页模式的状态显示。"""
+        if current_mode == "web":
+            self.mode_combo.blockSignals(True)
+            self.mode_combo.setCurrentIndex(3)
+            self.mode_combo.blockSignals(False)
+            if "网页端" not in self.usb_status_label.text():
+                self.usb_status_label.setText("网页端监听中")
+                self.usb_status_label.setStyleSheet("color: #00aa66;")
+            return
         if current_mode == "srt":
             self.mode_combo.blockSignals(True)
             self.mode_combo.setCurrentIndex(2)
