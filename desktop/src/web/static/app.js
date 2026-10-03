@@ -555,6 +555,9 @@
     state.running = false;
     cancelTick();
 
+    // 清理统计定时器：否则页面停止后仍会一直跑 setInterval
+    if (statsTimer) { clearInterval(statsTimer); statsTimer = 0; }
+
     if (state.encoder) {
       try { state.encoder.close(); } catch (e) { /* 忽略 */ }
       state.encoder = null;
@@ -633,6 +636,17 @@
 
     el('toggle').addEventListener('click', function () {
       if (state.running) stop(); else start();
+    });
+
+    // 关键修复：关闭/隐藏页面时强制释放摄像头与麦克风。
+    // 仅靠 WebSocket.onclose 在移动端（iOS Safari）不可靠——直接关闭标签页时
+    // 页面 JS 上下文会在收到断连通知前被销毁，stop() 来不及跑，导致摄像头
+    // 指示灯常亮且无法被其他 App 使用。下面几个事件覆盖多数关闭/退后台场景。
+    function releaseOnUnload() { stop(); }
+    window.addEventListener('pagehide', releaseOnUnload);
+    window.addEventListener('beforeunload', releaseOnUnload);
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'hidden') stop();
     });
   }
 

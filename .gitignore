@@ -62,3 +62,6 @@ Assets.car
 
 # Runtime log (Windows GUI mode)
 phonecam.log
+
+# 网页模式自签证书（desktop/src/.phonecam/，含私钥，勿提交）
+.phonecam/
