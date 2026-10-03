@@ -22,6 +22,7 @@ from web import (
 from discovery import DiscoveryService, DISCOVERY_PORT
 from usb import (
     UsbBridgeManager, is_usb_available, list_ios_devices,
+    diagnose_usb, is_usbmuxd_reachable, get_windows_amds_status,
     USB_DEFAULT_TCP_PORT, USB_DEFAULT_UDP_PORT, USB_DEFAULT_AUDIO_TCP_PORT,
 )
 
@@ -288,14 +289,36 @@ class PhoneCamApp(QObject):
 
         架构：iOS 端作为 TCP 服务器监听 5000，桌面端作为 TCP 客户端连接
         PC 127.0.0.1:5000（由 UsbmuxTcpForwarder 转发到 iOS 127.0.0.1:5000）。
+
+        工作流：
+        1. 切换模式时先跑诊断（pymobiledevice3 / AMDS / usbmuxd 端口 / 设备列表），
+           把结果作为状态消息展示给用户，让"连不上"有明确原因；
+        2. 启动 monitor 循环（2s 轮询设备插拔）；
+        3. 若已有设备接入 → 立即建桥，桥接 ready 后触发 on_bridge_ready 回调连接 receiver；
+        4. 若暂无设备 → 仅启动 monitor 与 receiver 监听，等用户插上 iPhone 后
+           monitor 自动建桥并通过 on_bridge_ready 触发 receiver 连接（无需用户重新点击）。
         """
         if self._mode == MODE_USB:
             return
         if not is_usb_available():
-            self.status_changed.emit("USB 直连不可用：未安装 pymobiledevice3")
+            self.status_changed.emit("USB 直连不可用：未安装 pymobiledevice3 (pip install pymobiledevice3)")
             return
         self._mode = MODE_USB
         self._emit_state("info", "切换到 USB 直连模式")
+
+        # 1. 跑环境诊断，把结果反馈给用户（常见故障：AMDS 未运行 / 未信任设备 / 未插 iPhone）
+        try:
+            issues = await diagnose_usb()
+            for it in issues:
+                lvl = it.get("level", "info")
+                msg = it.get("message", "")
+                hint = it.get("hint", "")
+                line = msg + (f" — {hint}" if hint else "")
+                self._emit_state(lvl, line)
+        except Exception as e:
+            self._emit_state("warn", f"USB 诊断异常: {e}")
+
+        # 2. 创建/复用 USB 管理器，注册 on_bridge_ready 回调
         if self.usb_manager is None:
             self.usb_manager = UsbBridgeManager(
                 tcp_port=RAW_STREAM_PORT,
@@ -303,25 +326,23 @@ class PhoneCamApp(QObject):
                 audio_tcp_port=USB_DEFAULT_AUDIO_TCP_PORT,
                 on_state=lambda lvl, msg: self._emit_state(lvl, msg),
                 on_devices_changed=self._on_usb_devices_changed,
+                on_bridge_ready=self._on_usb_bridge_ready,
             )
-        # 启动时自动选第一台设备
+        else:
+            # 复用管理器，刷新回调（避免上次设置的回调丢失）
+            self.usb_manager.on_bridge_ready = self._on_usb_bridge_ready
+
+        # 3. 启动 monitor（不主动指定 target_udid，让 monitor 自动发现并建桥）
         await self.usb_manager.start()
-        # 立即尝试获取已接入设备
-        devs = await list_ios_devices()
-        if devs:
-            await self.usb_manager._ensure_bridges(devs[0]["udid"])
-            # 等待 forwarder 真正绑定端口，避免 connect_client 因端口未就绪而失败
-            for udid, bridges in self.usb_manager._bridges.items():
-                tcp_bridge = bridges.get("tcp")
-                if tcp_bridge and hasattr(tcp_bridge, "wait_ready"):
-                    ready = await tcp_bridge.wait_ready(timeout=5.0)
-                    if ready:
-                        self._emit_state("info", "USB 桥接就绪 (forwarder 已监听)")
-                    else:
-                        self._emit_state("warn", "USB 桥接启动超时，仍尝试连接…")
-        # 重启接收器：TCP 用客户端模式连接 forwarder，UDP 仍监听 127.0.0.1
-        await self._restart_receivers(listen_host="127.0.0.1", use_tcp_client=True)
-        self._emit_state("info", "等待 iPhone 通过 USB 连接...")
+
+        # 4. 重启接收器：先绑到 127.0.0.1，但 TCP 客户端连接推迟到 on_bridge_ready 触发
+        #    （若设备已接入，monitor 会立即建桥并触发回调；若无设备，等用户插上后再触发）
+        await self._restart_receivers(listen_host="127.0.0.1", use_tcp_client=False, usb_pending_bridge=True)
+        # 若桥接已就绪（设备已接入），主动触发一次连接
+        if self.usb_manager.has_ready_bridge():
+            await self._on_usb_bridge_ready(self.usb_manager._current_udid or "")
+        else:
+            self._emit_state("info", "等待 iPhone 通过 USB 连接（插上后自动建桥）...")
         self._emit_devices()
 
     @asyncSlot()
@@ -350,6 +371,19 @@ class PhoneCamApp(QObject):
                 "SRT 模式不可用：未安装 libsrt 运行时库（设置 PHONECAM_LIBSRT_PATH 环境变量）"
             )
             # 回退 combo 到当前实际模式
+            self._emit_devices()
+            return
+        # 预检 libsrt 运行时库：缺失时给出明确安装指引，避免切到坏状态
+        try:
+            from raw_stream import libsrt as _srt
+            _srt.load_libsrt()
+        except Exception as e:
+            self.status_changed.emit(
+                f"SRT 模式不可用：{e}\n"
+                f"请安装 libsrt 共享库（Windows: 下载 srt.dll/libsrt.dll），"
+                f"或将 dll 所在目录加入 PATH，或设置环境变量 "
+                f"PHONECAM_LIBSRT_PATH=C:\\path\\to\\libsrt.dll"
+            )
             self._emit_devices()
             return
         self._mode = MODE_SRT
@@ -402,16 +436,21 @@ class PhoneCamApp(QObject):
     async def _restart_receivers(self, listen_host: str,
                                  use_tcp_client: bool = False,
                                  use_srt: bool = False,
-                                 use_web: bool = False):
+                                 use_web: bool = False,
+                                 usb_pending_bridge: bool = False):
         """重启接收器，绑定到 listen_host。
 
-        :param use_tcp_client: True=USB 模式，raw_receiver 作为 TCP 客户端
+        :param use_tcp_client: True=USB 模式且桥接已就绪，raw_receiver 立即作为 TCP 客户端
             连接 127.0.0.1:RAW_STREAM_PORT（forwarder 监听端口）；
             False=LAN 模式，raw_receiver 作为 TCP 服务器监听。
         :param use_srt: True=SRT 模式，使用 SRTStreamReceiver 替代 RawStreamReceiver；
             iOS 端为 caller 主动连接桌面 listener。
         :param use_web: True=网页模式，使用 WebStreamReceiver 起 HTTPS 站点；
             视频与音频都走 WebSocket，不启动独立 UDP 音频接收器。
+        :param usb_pending_bridge: True=USB 模式但桥接尚未就绪（设备未接入），
+            TCP 视频与音频通道都等 on_bridge_ready 回调触发后再连接。
+            注意：USB 模式下音频走 TCP 5002（usbmuxd 不转发 UDP），
+            因此该场景不启动 UDP 音频监听，避免收到无关数据包。
         """
         try:
             await self.raw_receiver.stop()
@@ -469,7 +508,30 @@ class PhoneCamApp(QObject):
                 self._emit_state("info",
                                  f"SRT listener 已启动 :{RAW_STREAM_PORT}，等待 iPhone 推流")
             except Exception as e:
+                # SRT 启动失败（常见：libsrt 缺失）时回退到 TCP 监听，
+                # 保持应用可用，避免半初始化状态 + 端口冲突
                 self._emit_state("error", f"SRT 接收器启动失败: {e}")
+                self.raw_receiver = RawStreamReceiver(
+                    host=listen_host, port=RAW_STREAM_PORT, on_frame=self._on_raw_frame,
+                )
+                try:
+                    await self.raw_receiver.start()
+                    self._emit_state("warn",
+                                     "SRT 不可用，已回退到 TCP 监听 :5000（LAN 模式可用）")
+                except Exception as e2:
+                    self._emit_state("error", f"回退 TCP 监听失败: {e2}")
+                    return
+        elif usb_pending_bridge:
+            # USB 模式但桥接未就绪：仅启动 UDP 音频监听（绑到 127.0.0.1，USB tethering 不可用就走 LAN），
+            # TCP 视频通道由 _on_usb_bridge_ready 触发 connect_client
+            self.raw_receiver = RawStreamReceiver(
+                host=listen_host, port=RAW_STREAM_PORT, on_frame=self._on_raw_frame,
+                on_disconnect=self._on_usb_disconnect,
+            )
+            self.audio_receiver = AudioStreamReceiver(
+                host=listen_host, port=AUDIO_STREAM_PORT, on_packet=self._on_audio_packet
+            )
+            # 不调用 raw_receiver.start()，仅作为占位符等待 _on_usb_bridge_ready 重建
         else:
             self.raw_receiver = RawStreamReceiver(
                 host=listen_host, port=RAW_STREAM_PORT, on_frame=self._on_raw_frame,
@@ -507,30 +569,85 @@ class PhoneCamApp(QObject):
             # 音频已在 WebSocket 通道里，无需独立接收器
             pass
         elif use_tcp_client:
-            # USB 模式：音频走 TCP 5002 桥接（usbmuxd 只转发 TCP，不转发 UDP）。
-            # 视频通道已经重试等待过 forwarder，这里通常一次就连上。
-            connected = False
-            for attempt in range(15):
-                try:
-                    await self.audio_receiver.connect_tcp_client(
-                        "127.0.0.1", USB_DEFAULT_AUDIO_TCP_PORT)
-                    connected = True
-                    self._emit_state("info", "USB 音频通道已连接")
-                    break
-                except (ConnectionError, OSError):
-                    await asyncio.sleep(0.5)
-                except Exception as e:
-                    self._emit_state("warn", f"USB 音频连接异常: {e}")
-                    break
-            if not connected:
-                # 视频不受影响，只提示音频不可用
-                self._emit_state("warn", "USB 音频桥接未就绪（视频不受影响）")
+            # USB 模式且桥接已就绪：立即连音频 TCP 5002
+            await self._connect_usb_audio(max_attempts=15, retry_delay=0.5)
+        elif usb_pending_bridge:
+            # 桥接尚未就绪。USB 模式下音频必须走 TCP（usbmuxd 不转发 UDP），
+            # 所以此处不能启动 UDP 监听，等 _on_usb_bridge_ready 回调再连接。
+            self._emit_state("info", "USB 音频通道等待桥接就绪…")
         else:
             try:
                 await self.audio_receiver.start()
             except Exception as e:
                 self._emit_state("error", f"重启 UDP 接收器失败: {e}")
         self._listen_host = listen_host
+
+    async def _connect_usb_audio(self, max_attempts: int = 15,
+                                 retry_delay: float = 0.5) -> bool:
+        """连接 USB 音频通道（TCP 5002）。
+
+        usbmuxd 只转发 TCP，所以 USB 模式下音频不能用 LAN 的 UDP 5001，
+        必须经桥接连到 iOS 端监听的 TCP 5002，否则麦克风数据永远到不了桌面端。
+        视频不受影响：失败时只提示音频不可用。
+        """
+        if self.audio_receiver is None:
+            return False
+        for attempt in range(max_attempts):
+            try:
+                await self.audio_receiver.connect_tcp_client(
+                    "127.0.0.1", USB_DEFAULT_AUDIO_TCP_PORT)
+                self._emit_state("info", "USB 音频通道已连接")
+                return True
+            except (ConnectionError, OSError):
+                if attempt == 0:
+                    self._emit_state("info", "等待 USB 音频桥接…")
+                await asyncio.sleep(retry_delay)
+            except Exception as e:
+                self._emit_state("warn", f"USB 音频连接异常: {e}")
+                break
+        self._emit_state("warn", "USB 音频桥接未就绪（视频不受影响）")
+        return False
+
+    async def _on_usb_bridge_ready(self, udid: str):
+        """USB 桥接就绪回调：设备已接入且 forwarder 已监听 PC 端口。
+
+        此函数由 UsbBridgeManager 在两种场景下调用：
+        1. 用户点击 USB 模式时设备已接入 → 立即建桥后触发
+        2. 用户先点 USB 模式（无设备）→ 插上 iPhone 后 monitor 建桥完成时触发
+
+        在此重建 RawStreamReceiver 为 TCP 客户端模式，连接 127.0.0.1:5000。
+        """
+        if self._mode != MODE_USB:
+            return
+        self._emit_state("info", f"USB 桥接就绪 (udid={udid[:8] if udid else '?'}...)，连接视频通道…")
+        # 重建 receiver 为客户端模式
+        try:
+            await self.raw_receiver.stop()
+        except Exception:
+            pass
+        self.raw_receiver = RawStreamReceiver(
+            host="127.0.0.1", port=RAW_STREAM_PORT,
+            on_frame=self._on_raw_frame,
+            on_disconnect=self._on_usb_disconnect,
+        )
+        # 短重试：forwarder 刚 set listening_event，端口一定就绪，最多 3 次
+        for attempt in range(3):
+            try:
+                await self.raw_receiver.connect_client("127.0.0.1", RAW_STREAM_PORT)
+                self._emit_state("info", "USB 视频通道已连接")
+                # 重置 H.264 解码器：清空参考帧，等下一帧 IDR 重新同步
+                if self._h264_decoder is not None:
+                    try:
+                        self._h264_decoder.reset()
+                    except Exception as e:
+                        logger.warning("H264 decoder reset on bridge ready failed: %s", e)
+                # 视频通了再连音频（TCP 5002）；音频失败不影响视频
+                await self._connect_usb_audio(max_attempts=5, retry_delay=0.3)
+                return
+            except (ConnectionError, OSError) as e:
+                self._emit_state("info", f"连接 forwarder 重试 ({attempt + 1}/3): {e}")
+                await asyncio.sleep(0.3)
+        self._emit_state("error", "USB 视频通道连接失败：forwarder 端口不可达")
 
     def _on_srt_disconnect(self):
         """SRT 客户端断开回调。与 USB 不同，SRT listener 保持开启，仅清理解码器缓存。"""
@@ -557,9 +674,16 @@ class PhoneCamApp(QObject):
         """USB 模式下视频通道断开时触发自动重连（异步）。
 
         断开原因：iOS 端未启动 / app 进入后台 / USB 线缆松动 / forwarder 重启。
-        重连策略：在后台任务中每 1.5s 尝试 connect_client，最多 40 次（60s）。
+        重连策略：
+        - 若桥接仍在（iOS app 后台/重启）→ 后台任务每 1.5s 重试 connect_client，最多 40 次（60s）；
+        - 若桥接已断（USB 线缆拔出）→ 不重试，等 monitor 检测到设备重新接入时
+          通过 on_bridge_ready 回调自动重建 receiver。
         """
         if self._mode != MODE_USB:
+            return
+        # 桥接已断（设备拔出）：不启动重连循环，等 on_bridge_ready 触发
+        if self.usb_manager is None or not self.usb_manager.has_ready_bridge():
+            self._emit_state("warn", "USB 视频通道断开（设备已拔出），等设备重新接入…")
             return
         self._emit_state("warn", "USB 视频通道断开，尝试重连…")
         if getattr(self, "_usb_reconnect_task", None) and not self._usb_reconnect_task.done():
@@ -569,10 +693,14 @@ class PhoneCamApp(QObject):
         )
 
     async def _usb_reconnect_loop(self):
-        """USB 视频通道自动重连循环。"""
+        """USB 视频通道自动重连循环（仅当桥接仍存活时）。"""
         for attempt in range(40):
             if self._mode != MODE_USB:
                 return  # 已切换到 LAN 模式
+            # 桥接中途断了：退出循环，等 on_bridge_ready 触发
+            if self.usb_manager is None or not self.usb_manager.has_ready_bridge():
+                self._emit_state("info", "USB 桥接已断开，等设备重新接入…")
+                return
             try:
                 # 每次重连前重建 receiver（旧的 reader/writer 已关闭）
                 try:

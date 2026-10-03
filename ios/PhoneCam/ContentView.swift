@@ -484,7 +484,7 @@ struct ContentView: View {
                     } else if isSRT {
                         statusMessage = "SRT 连接失败，请确认桌面端已切换到 SRT 模式且 IP/端口正确"
                     } else {
-                        statusMessage = "连接桌面端失败，请检查 IP/端口"
+                        statusMessage = "连接桌面端失败：\(Self.friendlyError(rawStreamServer.lastConnectionError))"
                     }
                 }
                 rawStreamServer.stop()
@@ -519,6 +519,25 @@ struct ContentView: View {
                 statusMessage = "已停止"
             }
         }
+    }
+
+    /// 将 NWConnection 的错误描述转成用户可读的中文提示。
+    /// 用于替代 Xcode 日志，直接在状态栏显示连接失败的具体原因。
+    private static func friendlyError(_ raw: String?) -> String {
+        guard let raw, !raw.isEmpty else {
+            return "请检查 IP、端口与 iPhone 本地网络权限"
+        }
+        let lower = raw.lowercased()
+        if lower.contains("localnetworkdenied") || lower.contains("denied") {
+            return "本地网络权限被拒绝，请在 设置 → 隐私与安全性 → 本地网络 中允许 PhoneCam"
+        }
+        if lower.contains("refused") || lower.contains("unreachable") {
+            return "目标不可达/被拒绝：请确认桌面端已启动、IP/端口正确且防火墙已放行 5000/5001"
+        }
+        if lower.contains("timed out") || lower.contains("timeout") {
+            return "连接超时：请确认电脑 IP 正确、手机与电脑在同一网络"
+        }
+        return "\(raw)（请检查 IP、端口与本地网络权限）"
     }
 
     /// 自动发现桌面端：UDP 广播 PHONECAM_DISCOVER 等待回包。

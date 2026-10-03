@@ -4,7 +4,9 @@
 decode() 返回 RGB24 ndarray；解码器内部缓冲，可能某些调用返回 None
 （解码器需要积累足够输入才输出帧），调用方需容忍 None。
 
-v2 优化：
+v3 优化：
+- 硬件解码：优先使用 h264_cuvid（NVIDIA NVDEC），失败回退到 h264 软解；
+  4K60 软解吃力，NVDEC 可稳定 4K60 + 显著降低 CPU 占用；
 - 低延迟解码：thread_type=NONE（单线程）+ low_delay=True + flags=low_delay；
 - 容错解码：strict_std_compliance=-1 + err_recognition=0，避免次要错误导致丢帧；
 - 断线重连后 reset()：清空解码器内部缓冲与参考帧，避免花屏。
@@ -23,41 +25,92 @@ class H264Decoder:
 
     PyAV 的 CodecContext 不是线程安全的，所有访问加锁。
     解码器在首个关键帧（含 SPS/PPS）到达后会自动初始化参数集。
+
+    解码器选择顺序：
+    1. h264_cuvid（NVIDIA NVDEC 硬件解码，4K60 稳定，CPU 占用极低）
+    2. h264（FFmpeg 软件解码，兼容性好但 4K60 吃力）
     """
 
-    def __init__(self):
+    # 候选解码器：按优先级排序，第一个成功初始化的胜出
+    _CODEC_CANDIDATES = ("h264_cuvid", "h264")
+
+    def __init__(self, prefer_hardware: bool = True):
+        """初始化 H.264 解码器。
+
+        :param prefer_hardware: True=优先使用 NVDEC 硬件解码（默认）；
+            False=强制使用软件解码（调试/兼容用）
+        """
         self._lock = threading.Lock()
         self._codec = None
+        self._codec_name: Optional[str] = None
+        self._is_hardware: bool = False
         self._frame_count = 0
+        self._prefer_hardware = prefer_hardware
         self._init_codec()
 
     def _init_codec(self):
-        try:
-            import av
-            self._codec = av.CodecContext.create("h264", "r")
-            # 低延迟解码配置（属性在不同 PyAV 版本可用性不同，逐项尝试）
-            # thread_type="NONE" 单线程降低延迟；low_delay 在部分版本不存在
-            for prop, val in [
-                ("thread_type", "NONE"),
-                ("low_delay", True),
-                # flags 字符串：low_delay 减少缓冲；unaligned 允许非对齐分辨率
-                ("flags", "low_delay+unaligned"),
-                # flags2: faststart 加快首帧输出
-                ("flags2", "+faststart"),
-                # 宽松标准合规：允许非标准流（如 iOS 硬编的某些边角参数）
-                ("strict_std_compliance", -1),
-                # 关闭错误识别：避免次要错误（如 SPS 变化）导致丢帧
-                ("err_recognition", 0),
-            ]:
-                try:
-                    setattr(self._codec, prop, val)
-                except (AttributeError, TypeError, ValueError):
-                    pass  # 该版本不支持此属性，跳过
-            logger.info("H264Decoder: PyAV h264 decoder initialized (av %s)",
-                        getattr(av, "__version__", "unknown"))
-        except Exception as e:
-            logger.error("H264Decoder: failed to init PyAV h264 decoder: %s", e)
-            self._codec = None
+        """初始化解码器：优先硬件，失败回退软件。"""
+        candidates = self._CODEC_CANDIDATES if self._prefer_hardware else ("h264",)
+        last_error: Optional[Exception] = None
+
+        for codec_name in candidates:
+            try:
+                import av
+                # 检查编解码器是否可用（PyAV 17+ 通过 codecs_available 列表）
+                available = getattr(av, "codecs_available", None)
+                if available is not None and codec_name not in available:
+                    continue
+
+                codec = av.CodecContext.create(codec_name, "r")
+                # 低延迟解码配置（属性在不同 PyAV 版本可用性不同，逐项尝试）
+                # thread_type="NONE" 单线程降低延迟；low_delay 在部分版本不存在
+                # 注意：h264_cuvid 不支持 thread_type=FRAME（硬件解码自带并行），
+                #       仅 NONE/FUTURE 可用，所以 NONE 是安全选择
+                for prop, val in [
+                    ("thread_type", "NONE"),
+                    ("low_delay", True),
+                    # flags 字符串：low_delay 减少缓冲；unaligned 允许非对齐分辨率
+                    ("flags", "low_delay+unaligned"),
+                    # flags2: faststart 加快首帧输出
+                    ("flags2", "+faststart"),
+                    # 宽松标准合规：允许非标准流（如 iOS 硬编的某些边角参数）
+                    ("strict_std_compliance", -1),
+                    # 关闭错误识别：避免次要错误（如 SPS 变化）导致丢帧
+                    ("err_recognition", 0),
+                ]:
+                    try:
+                        setattr(codec, prop, val)
+                    except (AttributeError, TypeError, ValueError):
+                        pass  # 该版本/该解码器不支持此属性，跳过
+
+                self._codec = codec
+                self._codec_name = codec_name
+                self._is_hardware = codec_name.endswith("_cuvid")
+                hw_tag = " [NVDEC hardware]" if self._is_hardware else " [software]"
+                logger.info("H264Decoder: PyAV %s decoder initialized%s (av %s, ffmpeg %s)",
+                            codec_name, hw_tag,
+                            getattr(av, "__version__", "unknown"),
+                            getattr(av, "ffmpeg_version_info", "unknown"))
+                return
+            except Exception as e:
+                last_error = e
+                logger.debug("H264Decoder: codec %s init failed: %s", codec_name, e)
+                continue
+
+        logger.error("H264Decoder: failed to init any decoder (last error: %s)", last_error)
+        self._codec = None
+        self._codec_name = None
+        self._is_hardware = False
+
+    @property
+    def is_hardware(self) -> bool:
+        """当前是否使用硬件解码（NVDEC）。"""
+        return self._is_hardware
+
+    @property
+    def codec_name(self) -> Optional[str]:
+        """当前使用的解码器名称（h264_cuvid / h264）。"""
+        return self._codec_name
 
     def decode(self, payload: bytes) -> Optional[np.ndarray]:
         """解码一个 Access Unit，返回 RGB24 ndarray 或 None。
@@ -94,8 +147,8 @@ class H264Decoder:
             frame = frames[-1]
             self._frame_count += 1
             if self._frame_count == 1:
-                logger.info("H264Decoder: first frame decoded %dx%d",
-                            frame.width, frame.height)
+                logger.info("H264Decoder: first frame decoded %dx%d via %s",
+                            frame.width, frame.height, self._codec_name)
             try:
                 arr = frame.to_ndarray(format="rgb24")
                 return arr
@@ -115,7 +168,8 @@ class H264Decoder:
         with self._lock:
             self._init_codec()
             self._frame_count = 0
-            logger.info("H264Decoder: decoder reset (cleared reference frames)")
+            logger.info("H264Decoder: decoder reset (cleared reference frames, codec=%s)",
+                        self._codec_name)
 
     def close(self):
         with self._lock:
@@ -125,3 +179,5 @@ class H264Decoder:
                 except Exception:
                     pass
                 self._codec = None
+                self._codec_name = None
+                self._is_hardware = False
