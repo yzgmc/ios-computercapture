@@ -48,6 +48,10 @@ final class RawStreamServer: VideoStreamTransport {
     private var frameID: UInt32 = 0
     private(set) var isRunning = false
 
+    /// 最近一次连接失败/等待的错误描述（供 UI 显示，如 localNetworkDenied / ECONNREFUSED）。
+    /// 连接就绪后会清空。写在传输队列上，读取方在 UI 侧（主线程）只读即可。
+    private(set) var lastConnectionError: String?
+
     // 背压：允许 3 帧在途，支撑 60fps 流水线发送。
     // 60fps 每帧 16.7ms，TCP send completion 典型 ~20-30ms，
     // maxPendingFrames=1 时上限仅 ~33fps（正好对应实测 30 多帧）。
@@ -105,8 +109,11 @@ final class RawStreamServer: VideoStreamTransport {
                                             port: NWEndpoint.Port(integerLiteral: port))
         let params = Self.makeTcpParameters()
         let conn = NWConnection(to: endpoint, using: params)
-        var isFirstReady = true
+        // 连接结果只回调一次（ready=true 或终态失败），
+        // 避免 ready 之后因对端断开触发 waiting/failed 覆盖 tcpReady 导致误报"连接失败"
+        var didReportReady = false
         conn.stateUpdateHandler = { [weak self] state in
+            guard let self = self else { return }
             switch state {
             case .setup:
                 print("RawStream: setup -> \(host):\(port)")
@@ -114,24 +121,34 @@ final class RawStreamServer: VideoStreamTransport {
                 print("RawStream: preparing")
             case .ready:
                 print("RawStream: TCP ready -> \(host):\(port)")
-                self?.isRunning = true
-                if isFirstReady {
-                    isFirstReady = false
+                self.isRunning = true
+                self.lastConnectionError = nil
+                if !didReportReady {
+                    didReportReady = true
                     onReady?(true)
                     // 新连接就绪：通知上层强制 IDR，让接收端解码器立即同步
-                    self?.onClientConnected?()
+                    self.onClientConnected?()
                 }
             case .waiting(let err):
                 print("RawStream: waiting (\(err))")
-                onReady?(false)
+                // 记录错误供 UI 显示（如本地网络权限被拒 localNetworkDenied），
+                // 但 waiting 可能是暂时的，不在此回调失败结果
+                self.lastConnectionError = err.localizedDescription
             case .failed(let err):
                 print("RawStream: failed (\(err))")
-                self?.isRunning = false
-                onReady?(false)
+                self.isRunning = false
+                self.lastConnectionError = err.localizedDescription
+                if !didReportReady {
+                    didReportReady = true
+                    onReady?(false)
+                }
             case .cancelled:
                 print("RawStream: cancelled")
-                self?.isRunning = false
-                onReady?(false)
+                self.isRunning = false
+                if !didReportReady {
+                    didReportReady = true
+                    onReady?(false)
+                }
             @unknown default:
                 print("RawStream: unknown state")
             }

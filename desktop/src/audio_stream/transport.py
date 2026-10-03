@@ -34,6 +34,9 @@ class AudioStreamReceiver:
     async def stop(self):
         if self._transport is not None:
             self._transport.close()
+            # Windows 上 UDP socket close 后端口不会立即释放，
+            # 让事件循环完成底层关闭，避免紧接着 rebind 同端口报 WinError 10048
+            await asyncio.sleep(0.05)
             self._transport = None
 
     def _handle_datagram(self, data: bytes, addr):

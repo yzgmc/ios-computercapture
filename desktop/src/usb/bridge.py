@@ -3,9 +3,16 @@
 iOS App 监听 127.0.0.1:5000 (TCP 视频) + 127.0.0.1:5001 (UDP 音频)。
 本模块在桌面端创建 usbmuxd 端口转发，把 PC 的 127.0.0.1:<port> 透明桥接到
 iOS 设备的 127.0.0.1:<port>，无需 Wi-Fi，无需个人热点。
+
+pymobiledevice3 10.x 接口（已验证）：
+- pymobiledevice3.tcp_forwarder.UsbmuxTcpForwarder(serial, dst_port, src_port, listening_event=...)
+- pymobiledevice3.usbmux.list_devices() -> async，返回 list[MuxDevice]
+- MuxDevice 字段：devid, serial, connection_type（注意：是 serial 不是 udid）
 """
 import asyncio
 import logging
+import socket
+import sys
 from typing import Optional, Callable, Awaitable
 
 logger = logging.getLogger(__name__)
@@ -15,11 +22,11 @@ DEFAULT_TCP_PORT = 5000
 DEFAULT_UDP_PORT = 5001
 
 # pymobiledevice3 的接口可能因版本变化，按需 try/except
-# 新版 (3.x) 模块叫 usbmux（无 d），旧版叫 usbmuxd
+# 新版 (3.x+) 模块叫 usbmux（无 d），旧版叫 usbmuxd
 # 新版 list_devices 是 async，旧版是 sync
 try:
     from pymobiledevice3.tcp_forwarder import UsbmuxTcpForwarder as _Pm3TcpForwarder
-    _PM3_FORWARDER_NEW = True  # UsbmuxTcpForwarder(serial, dst_port, src_port)
+    _PM3_FORWARDER_NEW = True  # UsbmuxTcpForwarder(serial, dst_port, src_port, listening_event=...)
 except ImportError:
     try:
         from pymobiledevice3.tcp_forwarder import TcpForwarder as _Pm3TcpForwarder
@@ -43,12 +50,189 @@ except ImportError:
         logger.warning("pymobiledevice3 usbmux not available: %s", e)
         _usbmux_list_devices = None
 
+# usbmuxd 后端地址（Windows: iTunes/AMDS 的 TCP 27015；Linux/macOS: /var/run/usbmuxd）
+_USBMUX_ADDRESS: Optional[str] = None
+try:
+    from pymobiledevice3.osu.os_utils import get_os_utils as _get_os_utils
+    _ou = _get_os_utils()
+    _usbmux_addr_raw = getattr(_ou, "usbmux_address", None)
+    if isinstance(_usbmux_addr_raw, tuple) and _usbmux_addr_raw:
+        # (('127.0.0.1', 27015), AF_INET) on Windows
+        first = _usbmux_addr_raw[0]
+        if isinstance(first, tuple) and len(first) >= 2:
+            _USBMUX_ADDRESS = f"{first[0]}:{first[1]}"
+        elif isinstance(first, str):
+            _USBMUX_ADDRESS = first
+    if _USBMUX_ADDRESS is None:
+        # 兜底：Windows 默认 iTunes 端口
+        from pymobiledevice3.usbmux import ITUNES_HOST as _ITUNES_HOST
+        if _ITUNES_HOST:
+            _USBMUX_ADDRESS = f"{_ITUNES_HOST[0]}:{_ITUNES_HOST[1]}"
+except Exception as e:
+    logger.debug("Failed to detect usbmux address: %s", e)
+
 _PM3_AVAILABLE = _Pm3TcpForwarder is not None and _usbmux_list_devices is not None
 
 
 def is_usb_available() -> bool:
-    """pymobiledevice3 是否可用（包含 usbmuxd 后端）。"""
+    """pymobiledevice3 是否可用（包含 usbmuxd 后端模块）。"""
     return _PM3_AVAILABLE
+
+
+def is_usbmuxd_reachable(timeout: float = 1.0) -> bool:
+    """检测 usbmuxd 后端服务是否可达。
+
+    Windows：检测 127.0.0.1:27015 (Apple Mobile Device Service 监听的 usbmuxd 端口)
+    Linux/macOS：检测 /var/run/usbmuxd Unix socket（本函数仅做 TCP 探测，Unix socket 由 pymobiledevice3 自检）
+
+    :return: True=后端可达（不代表有设备，仅代表服务在跑）
+    """
+    if not _PM3_AVAILABLE:
+        return False
+    # 仅 Windows 走 TCP 探测；其他平台信任 pymobiledevice3 的 create_mux
+    if sys.platform != "win32":
+        return True
+    if not _USBMUX_ADDRESS or ":" not in _USBMUX_ADDRESS:
+        return False
+    host, _, port_str = _USBMUX_ADDRESS.partition(":")
+    try:
+        port = int(port_str)
+    except ValueError:
+        return False
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except (OSError, socket.timeout):
+        return False
+
+
+def get_windows_amds_status() -> Optional[dict]:
+    """查询 Windows 上 Apple Mobile Device Service (AMDS) 状态。
+
+    :return: None=非 Windows 或查询失败；dict={
+        'name': str, 'status': str (Running/Stopped/...),
+        'start_type': str (Automatic/Manual/Disabled)
+    }
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import subprocess
+        # sc query 比Get-Service 快且不依赖 PowerShell
+        result = subprocess.run(
+            ["sc", "query", "Apple Mobile Device Service"],
+            capture_output=True, text=True, timeout=3.0,
+        )
+        info = {"name": "Apple Mobile Device Service", "status": "Unknown", "start_type": "Unknown"}
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("STATE"):
+                # "STATE              : 4  RUNNING"
+                parts = line.split(":", 1)
+                if len(parts) == 2:
+                    info["status"] = parts[1].strip().split()[-1].capitalize() if " " in parts[1].strip() else parts[1].strip().capitalize()
+        # 查询启动类型
+        result2 = subprocess.run(
+            ["sc", "qc", "Apple Mobile Device Service"],
+            capture_output=True, text=True, timeout=3.0,
+        )
+        for line in result2.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("START_TYPE"):
+                parts = line.split(":", 1)
+                if len(parts) == 2:
+                    raw = parts[1].strip()
+                    # "2   AUTO_START" / "3   DEMAND_START" / "4   DISABLED"
+                    if "AUTO" in raw:
+                        info["start_type"] = "Automatic"
+                    elif "DEMAND" in raw:
+                        info["start_type"] = "Manual"
+                    elif "DISABLED" in raw:
+                        info["start_type"] = "Disabled"
+                    else:
+                        info["start_type"] = raw
+        return info
+    except Exception as e:
+        logger.debug("get_windows_amds_status failed: %s", e)
+        return None
+
+
+async def diagnose_usb() -> list[dict]:
+    """综合诊断 USB 连接环境，返回问题列表（空列表=一切正常）。
+
+    每个问题：{'level': 'error'|'warn'|'info', 'check': str, 'message': str, 'hint': str}
+
+    常见故障：
+    1. pymobiledevice3 未安装 → 提示 pip install pymobiledevice3
+    2. Windows AMDS 服务未运行 → 提示启动服务或安装 iTunes
+    3. usbmuxd 后端不可达 → 提示 Apple Mobile Device Service 异常
+    4. 无设备接入 → 提示插上 iPhone 并在 iPhone 上信任电脑
+    """
+    issues: list[dict] = []
+
+    # 1. pymobiledevice3 模块检查
+    if not _PM3_AVAILABLE:
+        issues.append({
+            "level": "error",
+            "check": "pymobiledevice3",
+            "message": "pymobiledevice3 模块未安装或导入失败",
+            "hint": "运行: pip install pymobiledevice3",
+        })
+        return issues
+
+    # 2. Windows AMDS 服务状态
+    if sys.platform == "win32":
+        amds = get_windows_amds_status()
+        if amds is None:
+            issues.append({
+                "level": "warn",
+                "check": "amds_service",
+                "message": "无法查询 Apple Mobile Device Service 状态",
+                "hint": "请确认已安装 iTunes 或 Apple Mobile Device Service",
+            })
+        elif amds.get("status", "").lower() != "running":
+            issues.append({
+                "level": "error",
+                "check": "amds_service",
+                "message": f"Apple Mobile Device Service 未运行 (状态: {amds.get('status')})",
+                "hint": "运行 services.msc 启动 'Apple Mobile Device Service'，或重启 iTunes",
+            })
+        else:
+            # AMDS 运行中，进一步检测端口
+            if not is_usbmuxd_reachable(timeout=0.8):
+                issues.append({
+                    "level": "error",
+                    "check": "usbmuxd_port",
+                    "message": f"AMDS 服务运行中但 usbmuxd 端口 ({_USBMUX_ADDRESS}) 不可达",
+                    "hint": "请重启 Apple Mobile Device Service 或重新插拔 iPhone",
+                })
+
+    # 3. 设备列表检查（实际探测 usbmuxd）
+    try:
+        devs = await list_ios_devices()
+        if not devs:
+            issues.append({
+                "level": "warn",
+                "check": "device_list",
+                "message": "usbmuxd 可达但未检测到任何 iOS 设备",
+                "hint": "请用数据线连接 iPhone，并在 iPhone 屏幕上信任此电脑",
+            })
+        else:
+            issues.append({
+                "level": "info",
+                "check": "device_list",
+                "message": f"检测到 {len(devs)} 台 iOS 设备: {[d.get('udid', '?')[:8] for d in devs]}",
+                "hint": "",
+            })
+    except Exception as e:
+        issues.append({
+            "level": "error",
+            "check": "device_list",
+            "message": f"枚举 iOS 设备失败: {e}",
+            "hint": "usbmuxd 后端异常，请重启 Apple Mobile Device Service",
+        })
+
+    return issues
 
 
 async def list_ios_devices() -> list[dict]:
@@ -56,12 +240,15 @@ async def list_ios_devices() -> list[dict]:
 
     Returns:
         [{'udid': 'xxx', 'connection_type': 'USB', 'product_id': 4776, ...}, ...]
+
+    注意：pymobiledevice3 10.x 的 MuxDevice 只有 serial/devid/connection_type 三个字段，
+    没有 udid 属性（serial 即为 UDID）。
     """
     if not _PM3_AVAILABLE or _usbmux_list_devices is None:
         return []
     try:
         if _PM3_USBMUX_ASYNC:
-            # 新版 pymobiledevice3 3.x：list_devices 是 async
+            # 新版 pymobiledevice3 3.x+：list_devices 是 async
             devs = await _usbmux_list_devices()
         else:
             # 旧版：sync API，丢到 default executor
@@ -70,10 +257,15 @@ async def list_ios_devices() -> list[dict]:
         out = []
         for d in devs:
             try:
+                # MuxDevice 字段：devid, serial, connection_type
+                # serial 即 UDID（Apple 设备唯一标识），兼容旧代码字段名 udid
+                serial = getattr(d, "serial", None)
                 out.append({
-                    "udid": getattr(d, "udid", None) or getattr(d, "serial", None),
-                    "connection_type": "USB",
-                    "product_id": getattr(d, "product_id", None),
+                    "udid": serial,  # 兼容字段名
+                    "serial": serial,
+                    "connection_type": getattr(d, "connection_type", "USB"),
+                    "devid": getattr(d, "devid", None),
+                    "is_usb": getattr(d, "is_usb", True),
                 })
             except Exception:
                 continue
@@ -144,9 +336,8 @@ class UsbBridge:
     async def _run(self):
         """实际转发循环。
 
-        pymobiledevice3 的 UsbmuxTcpForwarder 不是 async context manager，
-        正确用法：
-            forwarder = UsbmuxTcpForwarder(serial, dst_port, src_port)
+        pymobiledevice3 10.x 的 UsbmuxTcpForwarder：
+            forwarder = UsbmuxTcpForwarder(serial, dst_port, src_port, listening_event=...)
             await forwarder.start()  # 阻塞直到 forwarder.stop() 被调用
             forwarder.stop()         # 同步方法，设置 stopped event
         """
@@ -203,19 +394,23 @@ class UsbBridgeManager:
     - 自动检测 iOS 设备
     - 自动为每个设备建立 TCP/UDP 桥接
     - 设备断开时清理
+    - 桥接就绪时触发回调（让上层连接 receiver）
     """
 
     def __init__(self,
                  tcp_port: int = DEFAULT_TCP_PORT,
                  udp_port: int = DEFAULT_UDP_PORT,
                  on_state: Optional[Callable[[str, str], None]] = None,
-                 on_devices_changed: Optional[Callable[[list], Awaitable[None]]] = None):
+                 on_devices_changed: Optional[Callable[[list], Awaitable[None]]] = None,
+                 on_bridge_ready: Optional[Callable[[str], Awaitable[None]]] = None):
         self.tcp_port = tcp_port
         self.udp_port = udp_port
         # on_state(level, message): level ∈ info/warn/error
         self.on_state = on_state or (lambda lvl, msg: None)
         # on_devices_changed(devices)
         self.on_devices_changed = on_devices_changed
+        # on_bridge_ready(udid): TCP 桥接已就绪，上层可连接 receiver
+        self.on_bridge_ready = on_bridge_ready
 
         self._bridges: dict[str, dict[str, UsbBridge]] = {}
         self._current_udid: Optional[str] = None
@@ -231,6 +426,12 @@ class UsbBridgeManager:
     def get_active_devices(self) -> list[dict]:
         return [{"udid": udid, "bridges": list(self._bridges.get(udid, {}).keys())}
                 for udid in self._bridges]
+
+    def has_ready_bridge(self, udid: Optional[str] = None) -> bool:
+        """检查指定 udid（或任意设备）的 TCP 桥接是否已就绪。"""
+        if udid is None:
+            return any("tcp" in b for b in self._bridges.values())
+        return udid in self._bridges and "tcp" in self._bridges[udid]
 
     async def start(self, target_udid: Optional[str] = None):
         """启动监控 + 为目标设备建桥。target_udid=None 则自动选第一台。"""
@@ -271,6 +472,18 @@ class UsbBridgeManager:
             await bridge.start()
             self._bridges.setdefault(udid, {})["tcp"] = bridge
             self._current_udid = udid
+            # 等待 forwarder 真正绑定 PC 端口
+            ready = await bridge.wait_ready(timeout=5.0)
+            if ready:
+                self._log("info", f"USB 桥接就绪 (forwarder 监听 127.0.0.1:{self.tcp_port})")
+                # 通知上层：桥接已就绪，可以连接 receiver
+                if self.on_bridge_ready:
+                    try:
+                        await self.on_bridge_ready(udid)
+                    except Exception as e:
+                        self._log("debug", f"on_bridge_ready 回调异常: {e}")
+            else:
+                self._log("warn", "USB 桥接启动超时（forwarder 未监听）")
             if self.on_devices_changed:
                 try:
                     await self.on_devices_changed(self.get_active_devices())
@@ -285,6 +498,13 @@ class UsbBridgeManager:
             try:
                 devs = await list_ios_devices()
                 current = {d["udid"] for d in devs if d.get("udid")}
+
+                # 自动为新设备建桥（仅当当前无活动桥接时）
+                if not self._bridges and devs:
+                    first = devs[0]
+                    if first.get("udid"):
+                        self._log("info", f"检测到设备接入: {first['udid'][:8]}...，自动建桥")
+                        await self._ensure_bridges(first["udid"])
 
                 # 移除已断开设备
                 for udid in list(self._bridges.keys()):

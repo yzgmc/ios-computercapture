@@ -102,6 +102,26 @@ def _candidate_paths() -> list[str]:
     if env_path:
         candidates.append(env_path)
 
+    # 项目内置目录 desktop/libsrt/（随仓库分发 libsrt.dll 及其依赖）
+    _repo_libsrt = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "libsrt",
+    )
+    if os.path.isdir(_repo_libsrt):
+        candidates.append(os.path.join(_repo_libsrt, "libsrt.dll"))
+        candidates.append(os.path.join(_repo_libsrt, "srt.dll"))
+
+    # PyInstaller 打包后：dll 位于可执行文件目录/libsrt/ 或 _internal/libsrt/
+    _exe_base = getattr(sys, "_MEIPASS", None) or os.path.dirname(sys.executable)
+    if _exe_base:
+        for _sub in ("libsrt", os.path.join("_internal", "libsrt")):
+            _p = os.path.join(_exe_base, _sub, "libsrt.dll")
+            if os.path.isfile(_p):
+                candidates.append(_p)
+            _p2 = os.path.join(_exe_base, _sub, "srt.dll")
+            if os.path.isfile(_p2):
+                candidates.append(_p2)
+
     if sys.platform == "win32":
         # Windows 常见安装位置
         progfiles = os.environ.get("ProgramFiles", r"C:\Program Files")
@@ -230,9 +250,15 @@ def socket_htons(port: int) -> int:
 
 
 def ip_to_uint32(ip: str) -> int:
-    """点分十进制 IPv4 -> 网络字节序 uint32。"""
+    """点分十进制 IPv4 -> sockaddr_in.sin_addr.s_addr（网络字节序）。
+
+    inet_aton 返回的是网络字节序的 4 字节；s_addr 要求内存字节序与
+    网络字节序一致，因此需以 *little* 端解析（本机小端时），
+    使写入 c_uint32 后的内存字节与 IP 顺序一致（如 127.0.0.1 -> 7F 00 00 01）。
+    用 'big' 会得到反序地址，导致 bind/connect 到错误地址。
+    """
     import socket as _socket
-    return int.from_bytes(_socket.inet_aton(ip), "big")
+    return int.from_bytes(_socket.inet_aton(ip), "little")
 
 
 def last_error_string(lib: ctypes.CDLL) -> str:
