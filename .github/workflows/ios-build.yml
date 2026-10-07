@@ -66,8 +66,16 @@ jobs:
       - name: Package unsigned IPA
         working-directory: ios
         run: |
+          APP_PATH=$(find build -type d -name "PhoneCam.app" | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::PhoneCam.app not found under build/"
+            find build -maxdepth 3 -type d | head -50
+            exit 1
+          fi
+          echo "Found app: $APP_PATH"
+          rm -rf Payload PhoneCam-unsigned.ipa
           mkdir -p Payload
-          cp -R build/Release-iphoneos/PhoneCam.app Payload/
+          cp -R "$APP_PATH" Payload/
           zip -qry PhoneCam-unsigned.ipa Payload
           ls -lh PhoneCam-unsigned.ipa
 
