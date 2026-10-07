@@ -137,6 +137,24 @@ def list_virtual_audio_devices():
 
 
 def find_default_virtual_audio_device() -> Optional[int]:
-    """查找默认虚拟音频设备索引。"""
-    virtual_devices = list_virtual_audio_devices()
-    return virtual_devices[0][0] if virtual_devices else None
+    """查找虚拟音频输出设备索引（VB-Cable 的 "CABLE Input" 播放端）。
+
+    注意不要选 "CABLE In 16ch" 这类 16 通道变体端点——
+    写入单声道音频时 CABLE Output 端收不到完整数据（实测无声）。
+    设备索引随插拔/重启变化，调用方应在每次启动虚拟麦克风时重新解析。
+    """
+    devices = list_audio_devices()
+    # 首选：名字包含 "cable input" 的播放端（VB-Cable 标准立体声端）
+    for idx, name in devices:
+        if "cable input" in name.lower():
+            return idx
+    # 退而求其次：任意 cable 端点，排除 16ch 变体
+    for idx, name in devices:
+        low = name.lower()
+        if "cable" in low and "16" not in low:
+            return idx
+    # 最后：任意虚拟音频设备
+    virtual = [(idx, name) for idx, name in devices
+               if any(k in name.lower() for k in
+                      ("cable", "blackhole", "virtual", "vb-audio"))]
+    return virtual[0][0] if virtual else None

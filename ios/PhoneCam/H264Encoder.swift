@@ -40,7 +40,8 @@ enum H264Quality: String, CaseIterable {
 
 /// H.264 硬件编码器封装（VTCompressionSession）。
 ///
-/// 输入：AVCaptureVideoDataOutput 输出的 CVPixelBuffer（BGRA）。
+/// 输入：AVCaptureVideoDataOutput 输出的 CVPixelBuffer（h264 采集模式下为 420f/NV12 原生格式，
+/// jpeg/bgra 模式下为 BGRA——VTCompressionSession 均可直接编码）。
 /// 输出：Annex-B 格式 H.264 NAL 字节流（每个 encode 调用对应一个 Access Unit，
 ///       关键帧 AU 包含 SPS+PPS+IDR，P 帧 AU 仅含 P-slice）。
 ///
@@ -54,8 +55,9 @@ enum H264Quality: String, CaseIterable {
 /// - 输出 AVCC → 转 Annex-B（startCode 00 00 00 01）便于桌面端 PyAV/ffmpeg 解码。
 final class H264Encoder {
     private var session: VTCompressionSession?
-    private var width: Int = 0
-    private var height: Int = 0
+    /// 编码尺寸（configure 时同步更新）。输出回调据此填充 RAW1 帧头，故对外只读。
+    private(set) var width: Int = 0
+    private(set) var height: Int = 0
     private var fps: Int = 60
     private var quality: H264Quality = .medium
     /// 当前平均码率（bps），用于动态调整与统计。
@@ -317,25 +319,54 @@ final class H264Encoder {
     }
 
     /// 从 sampleBuffer 的 CMBlockBuffer 提取 AVCC NALs，转换为 Annex-B 追加到 annexB。
+    /// 优先零拷贝：CMBlockBufferGetDataPointer 直接走查底层内存（每 NAL 仅一次拷入 annexB）；
+    /// 仅当块非连续（罕见）时回退整块拷贝路径。
     private func extractNALs(from sampleBuffer: CMSampleBuffer, into annexB: inout Data) {
         guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
         let totalLength = CMBlockBufferGetDataLength(blockBuffer)
-        var data = Data(count: totalLength)
-        data.withUnsafeMutableBytes { (rawBuf: UnsafeMutableRawBufferPointer) in
-            _ = CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: totalLength,
-                                           destination: rawBuf.baseAddress!)
-        }
+        guard totalLength > 0 else { return }
 
-        // AVCC 格式：[4B big-endian length | NAL data] 重复
+        var dataPtr: UnsafePointer<UInt8>?
+        var chunkLength = 0
+        var totalLengthOut = 0
+        let ptrStatus = CMBlockBufferGetDataPointer(
+            blockBuffer, atOffset: 0,
+            lengthAtOffsetOut: &chunkLength,
+            totalLengthOut: &totalLengthOut,
+            dataPointerOut: &dataPtr)
+
+        if ptrStatus == kCMBlockBufferNoErr, let ptr = dataPtr, chunkLength >= totalLength {
+            // 块连续：零拷贝直接走查
+            Self.walkAVCC(ptr, totalLength: totalLength, into: &annexB)
+        } else {
+            // 块非连续：回退整块拷贝
+            var data = Data(count: totalLength)
+            data.withUnsafeMutableBytes { (rawBuf: UnsafeMutableRawBufferPointer) in
+                if let base = rawBuf.baseAddress {
+                    _ = CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0,
+                                                   dataLength: totalLength, destination: base)
+                }
+            }
+            data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+                guard let base = raw.baseAddress else { return }
+                Self.walkAVCC(base.assumingMemoryBound(to: UInt8.self),
+                              totalLength: totalLength, into: &annexB)
+            }
+        }
+    }
+
+    /// 走查 AVCC 内存（[4B big-endian length | NAL] 重复），转 Annex-B 追加到 annexB。
+    private static func walkAVCC(_ ptr: UnsafePointer<UInt8>, totalLength: Int,
+                                 into annexB: inout Data) {
         var offset = 0
-        while offset + 4 <= data.count {
-            let length = data.subdata(in: offset..<(offset + 4))
-                .withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
+        while offset + 4 <= totalLength {
+            let length = (Int(ptr[offset]) << 24) | (Int(ptr[offset + 1]) << 16)
+                       | (Int(ptr[offset + 2]) << 8) | Int(ptr[offset + 3])
             let nalStart = offset + 4
-            let nalEnd = nalStart + Int(length)
-            guard nalEnd <= data.count else { break }
+            let nalEnd = nalStart + length
+            guard nalEnd <= totalLength else { break }
             annexB.append(Self.startCode)
-            annexB.append(data[nalStart..<nalEnd])
+            annexB.append(ptr + nalStart, count: length)
             offset = nalEnd
         }
     }

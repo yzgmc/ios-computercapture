@@ -239,20 +239,35 @@ final class AudioStreamServer {
 
     // MARK: - 格式转换工具
 
+    /// Float32 PCM → Int16 PCM。指针直转，无中间 Array 分配（每缓冲省 2 次堆分配）。
     private func convertFloatToInt16(_ data: Data) -> Data {
-        let floats: [Float] = data.withUnsafeBytes { ptr in
-            Array(ptr.bindMemory(to: Float.self))
+        var out = Data(count: data.count / 2)
+        data.withUnsafeBytes { (src: UnsafeRawBufferPointer) in
+            guard let s = src.baseAddress?.assumingMemoryBound(to: Float.self) else { return }
+            out.withUnsafeMutableBytes { (dst: UnsafeMutableRawBufferPointer) in
+                guard let d = dst.baseAddress?.assumingMemoryBound(to: Int16.self) else { return }
+                for i in 0..<(data.count / 4) {
+                    let v = s[i] * 32768.0
+                    d[i] = Int16(max(-32768.0, min(32767.0, v)))
+                }
+            }
         }
-        let int16s = floats.map { Int16(max(-32768, min(32767, $0 * 32768.0))) }
-        return int16s.withUnsafeBufferPointer { Data(buffer: $0) }
+        return out
     }
 
+    /// Int32 PCM → Int16 PCM。指针直转，无中间 Array 分配。
     private func convertInt32ToInt16(_ data: Data) -> Data {
-        let int32s: [Int32] = data.withUnsafeBytes { ptr in
-            Array(ptr.bindMemory(to: Int32.self))
+        var out = Data(count: data.count / 2)
+        data.withUnsafeBytes { (src: UnsafeRawBufferPointer) in
+            guard let s = src.baseAddress?.assumingMemoryBound(to: Int32.self) else { return }
+            out.withUnsafeMutableBytes { (dst: UnsafeMutableRawBufferPointer) in
+                guard let d = dst.baseAddress?.assumingMemoryBound(to: Int16.self) else { return }
+                for i in 0..<(data.count / 4) {
+                    d[i] = Int16(clamping: s[i] >> 16)
+                }
+            }
         }
-        let int16s = int32s.map { Int16(max(-32768, min(32767, $0 >> 16))) }
-        return int16s.withUnsafeBufferPointer { Data(buffer: $0) }
+        return out
     }
 
     private func send(chunk: Data) {
@@ -263,12 +278,12 @@ final class AudioStreamServer {
 
         var packet = Data(capacity: AudioStreamServer.headerSize + chunk.count)
         packet.append(contentsOf: AudioStreamServer.magic)
-        packet.append(contentsOf: withUnsafeBytes(of: currentSeq.bigEndian) { Array($0) })
-        packet.append(contentsOf: withUnsafeBytes(of: sampleRate.bigEndian) { Array($0) })
+        withUnsafeBytes(of: currentSeq.bigEndian) { packet.append(contentsOf: $0) }
+        withUnsafeBytes(of: sampleRate.bigEndian) { packet.append(contentsOf: $0) }
         packet.append(channels)
         packet.append(format)
         let payloadLength = UInt16(chunk.count)
-        packet.append(contentsOf: withUnsafeBytes(of: payloadLength.bigEndian) { Array($0) })
+        withUnsafeBytes(of: payloadLength.bigEndian) { packet.append(contentsOf: $0) }
         packet.append(chunk)
 
         connection.send(content: packet, completion: .contentProcessed { error in

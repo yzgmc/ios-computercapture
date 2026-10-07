@@ -20,9 +20,6 @@ jobs:
       - name: Show Xcode version
         run: xcodebuild -version
 
-      - name: Show available simulators
-        run: xcrun simctl list devices
-
       - name: Install iOS platform
         run: xcodebuild -downloadPlatform iOS
 
@@ -33,34 +30,35 @@ jobs:
         working-directory: ios
         run: xcodegen generate
 
-      - name: Inspect generated project
-        working-directory: ios
-        run: |
-          ls -la
-          ls -la PhoneCam.xcodeproj/xcshareddata/xcschemes/ || true
-
-      - name: Inspect project schemes
-        working-directory: ios
-        run: |
-          xcodebuild -project PhoneCam.xcodeproj -list
-
-      - name: Build iOS app
+      # 无签名真机构建（Apple 签名资料过期，产物 ipa 需用户自行签名安装，
+      # 例如 Sideloadly / AltStore / TrollStore）
+      - name: Build iOS app (unsigned, device)
         working-directory: ios
         run: |
           set -o pipefail
           xcodebuild clean build \
             -project PhoneCam.xcodeproj \
             -scheme PhoneCam \
-            -sdk iphonesimulator \
-            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
             CONFIGURATION_BUILD_DIR=$PWD/build \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
             | xcbeautify --renderer github-actions
 
-      - name: Upload build artifacts
+      - name: Package unsigned IPA
+        working-directory: ios
+        run: |
+          mkdir -p Payload
+          cp -R build/Release-iphoneos/PhoneCam.app Payload/
+          zip -qry PhoneCam-unsigned.ipa Payload
+          ls -lh PhoneCam-unsigned.ipa
+
+      - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ios-build-artifacts
-          path: ios/build/**
+          name: PhoneCam-unsigned-ipa
+          path: ios/PhoneCam-unsigned.ipa
           if-no-files-found: error

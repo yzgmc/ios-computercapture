@@ -146,8 +146,13 @@ class CaptureManager: NSObject, ObservableObject {
     }
 
     @objc private func orientationDidChange() {
-        guard let previewLayer = previewLayer else { return }
-        previewLayer.connection?.videoOrientation = currentVideoOrientation()
+        let orientation = currentVideoOrientation()
+        previewLayer?.connection?.videoOrientation = orientation
+        // 视频输出帧同步旋转，保证 LAN/SRT 模式与预览方向一致
+        if let connection = videoOutput?.connection(with: .video),
+           connection.isVideoOrientationSupported {
+            connection.videoOrientation = orientation
+        }
     }
 
     private func currentVideoOrientation() -> AVCaptureVideoOrientation {
@@ -219,17 +224,22 @@ class CaptureManager: NSObject, ObservableObject {
             }
 
             let videoOutput = AVCaptureVideoDataOutput()
-            // 统一输出 BGRA，供原画质 TCP 模块直接发送
-            videoOutput.videoSettings = [
-                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
-            ]
+            self.videoOutput = videoOutput
+            // 像素格式按编码方式选择：h264 用 420f（NV12，硬编原生输入，省去每帧
+            // BGRA→NV12 转换），jpeg/bgra 用 BGRA（编码/直发路径所需）
+            applyVideoOutputPixelFormat()
             // 丢帧策略：实时性优先，背压由 RawStreamServer 处理
             videoOutput.alwaysDiscardsLateVideoFrames = true
             // 专用串行队列处理视频帧，避免阻塞主线程
             videoOutput.setSampleBufferDelegate(self, queue: DispatchQueue(label: "videoQueue", qos: .userInitiated))
             if captureSession.canAddOutput(videoOutput) {
                 captureSession.addOutput(videoOutput)
-                self.videoOutput = videoOutput
+                // 输出帧跟随设备方向旋转：不设置的话竖持手机时
+                // 发出去的是横屏旋转帧（桌面端看到"人横躺"的画面）
+                if let connection = videoOutput.connection(with: .video),
+                   connection.isVideoOrientationSupported {
+                    connection.videoOrientation = currentVideoOrientation()
+                }
             }
         } catch {
             print("视频配置失败: \(error)")
@@ -262,6 +272,21 @@ class CaptureManager: NSObject, ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             self?.captureSession.startRunning()
         }
+    }
+
+    /// 按当前编码方式设置视频输出像素格式：
+    /// - h264: 420f（NV12）——VTCompressionSession 原生输入，免去每帧 BGRA→NV12 转换
+    ///   （1080p60 下 BGRA 输入需约 500MB/s 内存带宽做转换，420f 仅约 190MB/s）；
+    /// - jpeg/bgra: 32BGRA——JPEG 编码（VTCreateCGImageFromCVPixelBuffer）与 BGRA 直发所需。
+    /// 需在 captureSession.beginConfiguration()/commitConfiguration() 之间调用。
+    private func applyVideoOutputPixelFormat() {
+        guard let videoOutput = videoOutput else { return }
+        let pixelFormat: OSType = videoCodec == .h264
+            ? kCVPixelFormatType_420f
+            : kCVPixelFormatType_32BGRA
+        videoOutput.videoSettings = [
+            kCVPixelBufferPixelFormatTypeKey as String: pixelFormat
+        ]
     }
 
     /// 分辨率变更时重新配置采集格式。仅在采集已启动时生效。
@@ -412,8 +437,10 @@ extension CaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptur
                 // JPEG 压缩路径：带宽 ~15-20 MB/s
                 processVideoFrameAsJPEG(sampleBuffer)
             case .bgra:
-                // BGRA 无压缩路径：带宽极高（1080p60 ≈ 500 MB/s），仅 WiFi 6/USB 3 可用
-                rawStreamServer?.processSampleBuffer(sampleBuffer, requiresBGRAConversion: false)
+                // BGRA 无压缩路径：带宽极高（1080p60 ≈ 500 MB/s），仅 WiFi 6/USB 3 可用。
+                // requiresBGRAConversion=true：切换编码方式的过渡帧可能是 420f，
+                // 交给传输层校验并丢弃，避免把 NV12 字节当 BGRA 发出去（花屏）
+                rawStreamServer?.processSampleBuffer(sampleBuffer, requiresBGRAConversion: true)
             }
         } else if output is AVCaptureAudioDataOutput {
             // 音频帧转发到 UDP 模块（AudioStreamServer 动态检测格式并转换为 PCM16LE）
@@ -483,10 +510,17 @@ extension CaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptur
             h264Encoder.setBitrate(lastAppliedBitrate)
         }
 
-        // 设置编码输出回调（每次都设，确保 rawStreamServer 引用最新）
-        h264Encoder.onFrame = { [weak self] data, isKeyframe in
-            self?.rawStreamServer?.processH264Frame(data, width: width, height: height,
-                                                     isKeyframe: isKeyframe)
+        // 编码输出回调只挂一次：闭包内动态读取编码器当前尺寸与最新 rawStreamServer，
+        // 避免每帧闭包分配（尺寸在 configure 内同步更新，与编码调用同队列串行）
+        if h264Encoder.onFrame == nil {
+            h264Encoder.onFrame = { [weak self] data, isKeyframe in
+                guard let self = self else { return }
+                self.rawStreamServer?.processH264Frame(
+                    data,
+                    width: self.h264Encoder.width,
+                    height: self.h264Encoder.height,
+                    isKeyframe: isKeyframe)
+            }
         }
 
         // 起流首帧/客户端重连/解码器重置 → 强制 IDR
@@ -503,6 +537,10 @@ extension CaptureManager {
     /// 编码方式/质量切换时的处理：H.264 编码器需重新配置（下次 processVideoFrameAsH264 触发），
     /// 切换到 H.264 或切换质量预设时强制下一帧为 IDR。
     private func reconfigureEncoder() async {
+        // 编码方式切换时同步切换输出像素格式（h264↔420f，jpeg/bgra↔BGRA）
+        captureSession.beginConfiguration()
+        applyVideoOutputPixelFormat()
+        captureSession.commitConfiguration()
         if videoCodec == .h264 {
             h264NeedsKeyframe = true
             // 用当前已知尺寸/fps 重新配置（若已采集，actualCaptureSize 有值）

@@ -743,6 +743,12 @@ class PhoneCamApp(QObject):
     @asyncSlot(bool)
     async def _on_virtual_audio_toggled(self, enabled: bool):
         if enabled:
+            # 每次启动前重新解析设备索引（插拔/重装驱动后索引会变化）
+            self.audio_player.output_device_index = find_default_virtual_audio_device()
+            if self.audio_player.output_device_index is None:
+                self.status_changed.emit(
+                    "⚠ 未找到 VB-Cable 虚拟声卡，音频将输出到默认扬声器；"
+                    "如需虚拟麦克风请先安装 VB-Audio Virtual Cable")
             self.audio_player.start()
             self.status_changed.emit("虚拟麦克风已启动")
         else:

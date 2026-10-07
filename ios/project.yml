@@ -30,7 +30,14 @@ targets:
         SWIFT_VERSION: "5.9"
         TARGETED_DEVICE_FAMILY: "1,2"
         CLANG_ENABLE_MODULES: YES
-        SWIFT_OPTIMIZATION_LEVEL: "-Onone"
+      configs:
+        Debug:
+          SWIFT_OPTIMIZATION_LEVEL: "-Onone"
+        Release:
+          # Release 必须开优化：此前 -Onone 放在 base 里覆盖了 Release 默认 -O，
+          # 导致所有构建（包括真机包）都是无优化编译，性能大打折扣
+          SWIFT_OPTIMIZATION_LEVEL: "-O"
+          SWIFT_COMPILATION_MODE: wholemodule
 schemes:
   PhoneCam:
     build:

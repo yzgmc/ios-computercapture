@@ -60,7 +60,8 @@
     facing: 'user',
     sampleRate: 48000,
     channels: 1,
-    audioEnabled: true
+    audioEnabled: true,
+    rotation: 0                // 画面旋转角度：0/90/180/270（发送端 canvas 旋转）
   };
 
   // ------------------------------------------------------------------ //
@@ -280,6 +281,33 @@
     return state.ctx2d;
   }
 
+  /**
+   * 把视频帧按 state.rotation 旋转后画到内部画布，返回输出尺寸。
+   * 背景：iOS Safari 的页面默认竖屏锁定，手机横放时 getUserMedia 轨道仍是
+   * 竖屏尺寸，像素内容却旋转了 90°，桌面端会看到"人横躺"的画面。
+   * 由发送端在此处统一旋转纠正，H.264/JPEG/BGRA 三条路径共用。
+   */
+  function drawRotated(video, rotation) {
+    var w = video.videoWidth, h = video.videoHeight;
+    var swap = (rotation === 90 || rotation === 270);
+    var outW = swap ? h : w, outH = swap ? w : h;
+    var ctx = ensureCanvas(outW, outH);
+    ctx.save();
+    if (rotation === 90) {
+      ctx.translate(outW, 0);
+      ctx.rotate(Math.PI / 2);
+    } else if (rotation === 180) {
+      ctx.translate(outW, outH);
+      ctx.rotate(Math.PI);
+    } else if (rotation === 270) {
+      ctx.translate(0, outH);
+      ctx.rotate(-Math.PI / 2);
+    }
+    ctx.drawImage(video, 0, 0, w, h);
+    ctx.restore();
+    return { w: outW, h: outH };
+  }
+
   function frameFromVideo() {
     var v = state.videoEl;
     if (!v || v.readyState < 2 || !v.videoWidth) return null;
@@ -289,11 +317,18 @@
   }
 
   function encodeH264Tick() {
-    var dim = frameFromVideo();
-    if (!dim || !state.encoder) return;
+    var v = state.videoEl;
+    if (!v || v.readyState < 2 || !v.videoWidth) return;
+    if (!state.encoder) return;
     var frame;
     try {
-      frame = new VideoFrame(state.videoEl, { timestamp: performance.now() * 1000 });
+      if (state.rotation) {
+        // 旋转路径：先画到画布再取 VideoFrame（尺寸随旋转互换）
+        drawRotated(v, state.rotation);
+        frame = new VideoFrame(state.canvas, { timestamp: performance.now() * 1000 });
+      } else {
+        frame = new VideoFrame(v, { timestamp: performance.now() * 1000 });
+      }
     } catch (e) {
       return;
     }
@@ -311,10 +346,17 @@
 
   function encodeJPEGTick() {
     if (state.encodingBusy) { state.dropped++; return; }
-    var dim = frameFromVideo();
-    if (!dim) return;
-    var ctx = ensureCanvas(dim.w, dim.h);
-    ctx.drawImage(state.videoEl, 0, 0, dim.w, dim.h);
+    var v = state.videoEl;
+    if (!v || v.readyState < 2 || !v.videoWidth) return;
+    var dim;
+    if (state.rotation) {
+      dim = drawRotated(v, state.rotation);
+    } else {
+      dim = { w: v.videoWidth, h: v.videoHeight };
+      var ctx = ensureCanvas(dim.w, dim.h);
+      ctx.drawImage(v, 0, 0, dim.w, dim.h);
+    }
+    state.width = dim.w; state.height = dim.h;
 
     state.encodingBusy = true;
     state.canvas.toBlob(function (blob) {
@@ -329,11 +371,18 @@
   }
 
   function encodeBGRATick() {
-    var dim = frameFromVideo();
-    if (!dim) return;
-    var ctx = ensureCanvas(dim.w, dim.h);
-    ctx.drawImage(state.videoEl, 0, 0, dim.w, dim.h);
-    var img = ctx.getImageData(0, 0, dim.w, dim.h);
+    var v = state.videoEl;
+    if (!v || v.readyState < 2 || !v.videoWidth) return;
+    var dim;
+    if (state.rotation) {
+      dim = drawRotated(v, state.rotation);
+    } else {
+      dim = { w: v.videoWidth, h: v.videoHeight };
+      var ctx = ensureCanvas(dim.w, dim.h);
+      ctx.drawImage(v, 0, 0, dim.w, dim.h);
+    }
+    state.width = dim.w; state.height = dim.h;
+    var img = state.ctx2d.getImageData(0, 0, dim.w, dim.h);
     var src = img.data;                       // RGBA
     var out = new Uint8Array(src.length);     // 转 BGRA：桌面端 format=0 期望 BGRA
     for (var i = 0; i < src.length; i += 4) {
@@ -484,6 +533,7 @@
     state.fps = parseInt(el('fps').value, 10) || 30;
     state.facing = el('facing').value;
     state.audioEnabled = el('audio').value === '1';
+    state.rotation = parseInt(el('rotation').value, 10) || 0;
     var targetH = parseInt(el('resolution').value, 10) || 720;
 
     setStatus('正在连接…');
@@ -528,10 +578,13 @@
 
     if (state.mode === 'h264') {
       var dim = frameFromVideo();
-      state.encoder = await setupEncoder(
-        (dim && dim.w) || Math.round(targetH * 16 / 9),
-        (dim && dim.h) || targetH,
-        state.fps);
+      var ew = (dim && dim.w) || Math.round(targetH * 16 / 9);
+      var eh = (dim && dim.h) || targetH;
+      // 旋转 90/270 时编码器输出宽高互换
+      if (state.rotation === 90 || state.rotation === 270) {
+        var t = ew; ew = eh; eh = t;
+      }
+      state.encoder = await setupEncoder(ew, eh, state.fps);
       if (!state.encoder) {
         state.mode = 'jpeg';   // 无 WebCodecs 或 H.264 不可用，降级
       }
@@ -636,6 +689,22 @@
 
     el('toggle').addEventListener('click', function () {
       if (state.running) stop(); else start();
+    });
+
+    // 画面旋转实时切换：JPEG/BGRA 下一帧直接生效；
+    // H.264 需按新尺寸重建编码器，并让首帧立即为关键帧（桌面端重新同步参数）
+    el('rotation').addEventListener('change', function () {
+      var rot = parseInt(this.value, 10) || 0;
+      state.rotation = rot;
+      if (!state.running || state.mode !== 'h264' || !state.encoder) return;
+      try { state.encoder.close(); } catch (e) { /* 已关闭 */ }
+      state.encoder = null;
+      state.framesSinceKey = 60;   // 下一帧强制关键帧
+      var dim = frameFromVideo();
+      var ew = (dim && dim.w) || state.width || 1280;
+      var eh = (dim && dim.h) || state.height || 720;
+      if (rot === 90 || rot === 270) { var t = ew; ew = eh; eh = t; }
+      setupEncoder(ew, eh, state.fps).then(function (enc) { state.encoder = enc; });
     });
 
     // 关键修复：关闭/隐藏页面时强制释放摄像头与麦克风。

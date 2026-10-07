@@ -37,6 +37,8 @@ class AudioPlayer:
 
     def start(self):
         """初始化 PyAudio，但不立即打开输出流（等首个包到达再开）。"""
+        if self._running and self._pa is not None:
+            return  # 已在运行，避免重复创建 PyAudio 实例
         try:
             import pyaudio
             self._pa = pyaudio.PyAudio()

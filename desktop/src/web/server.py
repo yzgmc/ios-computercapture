@@ -155,7 +155,8 @@ class WebStreamReceiver:
                 body = f.read()
         except OSError as e:
             return web.Response(status=500, text=f"index.html 读取失败: {e}")
-        return web.Response(text=body, content_type="text/html")
+        return web.Response(text=body, content_type="text/html",
+                            headers={"Cache-Control": "no-store"})
 
     async def _handle_static(self, request):
         from aiohttp import web
@@ -168,7 +169,8 @@ class WebStreamReceiver:
                 body = f.read()
         except OSError as e:
             return web.Response(status=500, text=f"{name} 读取失败: {e}")
-        return web.Response(text=body, content_type="application/javascript")
+        return web.Response(text=body, content_type="application/javascript",
+                            headers={"Cache-Control": "no-store"})
 
     async def _handle_health(self, request):
         from aiohttp import web
