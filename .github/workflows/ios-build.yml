@@ -20,8 +20,9 @@ jobs:
       - name: Show Xcode version
         run: xcodebuild -version
 
+      # macos-15 runner 预装 iOS platform；下载偶发网络抖动（exit 70）不应阻塞构建
       - name: Install iOS platform
-        run: xcodebuild -downloadPlatform iOS
+        run: xcodebuild -downloadPlatform iOS || echo "::warning::iOS platform download skipped (likely preinstalled)"
 
       - name: Install xcodegen
         run: brew install xcodegen
