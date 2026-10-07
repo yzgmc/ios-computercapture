@@ -20,9 +20,23 @@ jobs:
       - name: Show Xcode version
         run: xcodebuild -version
 
-      # macos-15 runner 预装 iOS platform；下载偶发网络抖动（exit 70）不应阻塞构建
+      # 真机平台可能未预装，必须下载成功。新 VM 上 -downloadPlatform 偶发
+      # "Unable to connect to simulator"（CoreSimulator 服务未就绪）：
+      # 先跑一次 simctl 唤醒服务，再带 3 次重试
       - name: Install iOS platform
-        run: xcodebuild -downloadPlatform iOS || echo "::warning::iOS platform download skipped (likely preinstalled)"
+        run: |
+          xcrun simctl list devices >/dev/null 2>&1 || true
+          for i in 1 2 3; do
+            echo "Attempt $i: downloading iOS platform..."
+            if xcodebuild -downloadPlatform iOS; then
+              echo "iOS platform installed"
+              exit 0
+            fi
+            echo "Attempt $i failed, retrying in 20s..."
+            sleep 20
+          done
+          echo "::error::Failed to download iOS platform after 3 attempts"
+          exit 1
 
       - name: Install xcodegen
         run: brew install xcodegen
