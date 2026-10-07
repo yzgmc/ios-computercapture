@@ -191,16 +191,10 @@ final class SRTStreamServer: VideoStreamTransport {
         let currentFrameID = frameID
         frameID &+= 1
 
-        var packet = Data(count: Self.headerSize + payloadLength)
-        packet.withUnsafeMutableBytes { raw in
-            RAW1Header.write(into: raw, frameID: currentFrameID, width: UInt32(width),
-                             height: UInt32(height), format: 0,
-                             bytesPerRow: UInt32(bytesPerRow),
-                             payloadLength: UInt32(payloadLength))
-            if let dst = raw.baseAddress?.advanced(by: Self.headerSize) {
-                dst.copyMemory(from: basePtr, count: payloadLength)
-            }
-        }
+        let packet = RAW1Header.makePacket(frameID: currentFrameID, width: UInt32(width),
+                                           height: UInt32(height), format: 0,
+                                           bytesPerRow: UInt32(bytesPerRow),
+                                           payload: basePtr, payloadLength: payloadLength)
 
         send(packet)
         sentCount &+= 1
@@ -214,17 +208,10 @@ final class SRTStreamServer: VideoStreamTransport {
         let currentFrameID = frameID
         frameID &+= 1
 
-        var packet = Data(count: Self.headerSize + jpegData.count)
-        packet.withUnsafeMutableBytes { raw in
-            RAW1Header.write(into: raw, frameID: currentFrameID, width: UInt32(width),
-                             height: UInt32(height), format: 10, bytesPerRow: 0,
-                             payloadLength: UInt32(jpegData.count))
-            jpegData.withUnsafeBytes { src in
-                if let dst = raw.baseAddress?.advanced(by: Self.headerSize),
-                   let srcBase = src.baseAddress {
-                    dst.copyMemory(from: srcBase, count: jpegData.count)
-                }
-            }
+        let packet = jpegData.withUnsafeBytes { src in
+            RAW1Header.makePacket(frameID: currentFrameID, width: UInt32(width),
+                                  height: UInt32(height), format: 10, bytesPerRow: 0,
+                                  payload: src.baseAddress, payloadLength: jpegData.count)
         }
 
         send(packet)
@@ -239,17 +226,10 @@ final class SRTStreamServer: VideoStreamTransport {
         let currentFrameID = frameID
         frameID &+= 1
 
-        var packet = Data(count: Self.headerSize + h264Data.count)
-        packet.withUnsafeMutableBytes { raw in
-            RAW1Header.write(into: raw, frameID: currentFrameID, width: UInt32(width),
-                             height: UInt32(height), format: 20, bytesPerRow: 0,
-                             payloadLength: UInt32(h264Data.count))
-            h264Data.withUnsafeBytes { src in
-                if let dst = raw.baseAddress?.advanced(by: Self.headerSize),
-                   let srcBase = src.baseAddress {
-                    dst.copyMemory(from: srcBase, count: h264Data.count)
-                }
-            }
+        let packet = h264Data.withUnsafeBytes { src in
+            RAW1Header.makePacket(frameID: currentFrameID, width: UInt32(width),
+                                  height: UInt32(height), format: 20, bytesPerRow: 0,
+                                  payload: src.baseAddress, payloadLength: h264Data.count)
         }
 
         send(packet)

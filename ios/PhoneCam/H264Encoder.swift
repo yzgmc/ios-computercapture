@@ -326,7 +326,7 @@ final class H264Encoder {
         let totalLength = CMBlockBufferGetDataLength(blockBuffer)
         guard totalLength > 0 else { return }
 
-        var dataPtr: UnsafePointer<UInt8>?
+        var dataPtr: UnsafeMutablePointer<CChar>?
         var chunkLength = 0
         var totalLengthOut = 0
         let ptrStatus = CMBlockBufferGetDataPointer(
@@ -337,7 +337,8 @@ final class H264Encoder {
 
         if ptrStatus == kCMBlockBufferNoErr, let ptr = dataPtr, chunkLength >= totalLength {
             // 块连续：零拷贝直接走查
-            Self.walkAVCC(ptr, totalLength: totalLength, into: &annexB)
+            Self.walkAVCC(UnsafeRawPointer(ptr).assumingMemoryBound(to: UInt8.self),
+                          totalLength: totalLength, into: &annexB)
         } else {
             // 块非连续：回退整块拷贝
             var data = Data(count: totalLength)

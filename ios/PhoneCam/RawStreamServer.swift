@@ -3,10 +3,12 @@ import Network
 import CoreVideo
 import CoreMedia
 
-/// RAW1 帧头写入工具：28B 大端帧头（magic/frame_id/width/height/format/bytes_per_row/payload_length）。
-/// 直接内存写入替代逐字段 append，每帧省 7 次临时 Data 分配。
+/// RAW1 帧头与整包构建工具：28B 大端帧头（magic/frame_id/width/height/format/bytes_per_row/payload_length）。
+/// 单次内存写入替代逐字段 append，每帧省 7 次临时 Data 分配。
 /// RawStreamServer 与 SRTStreamServer 共用。
 enum RAW1Header {
+    static let size = 28
+
     static func write(into raw: UnsafeMutableRawBufferPointer,
                       frameID: UInt32, width: UInt32, height: UInt32,
                       format: UInt32, bytesPerRow: UInt32, payloadLength: UInt32) {
@@ -17,6 +19,26 @@ enum RAW1Header {
         raw.storeBytes(of: format.bigEndian, toByteOffset: 16, as: UInt32.self)
         raw.storeBytes(of: bytesPerRow.bigEndian, toByteOffset: 20, as: UInt32.self)
         raw.storeBytes(of: payloadLength.bigEndian, toByteOffset: 24, as: UInt32.self)
+    }
+
+    /// 构建完整 RAW1 包：28B 帧头 + payload，单次分配 + 单次拷贝。
+    /// payload 为 nil（空数据）时仅写帧头。
+    static func makePacket(frameID: UInt32, width: UInt32, height: UInt32,
+                           format: UInt32, bytesPerRow: UInt32,
+                           payload: UnsafeRawPointer?, payloadLength: Int) -> Data {
+        var packet = Data(count: size + payloadLength)
+        packet.withUnsafeMutableBytes { raw in
+            write(into: raw, frameID: frameID, width: width, height: height,
+                  format: format, bytesPerRow: bytesPerRow,
+                  payloadLength: UInt32(payloadLength))
+            if let payload = payload, payloadLength > 0,
+               let dst = raw.baseAddress?.advanced(by: size) {
+                UnsafeMutableRawBufferPointer(start: dst, count: payloadLength)
+                    .copyMemory(from: UnsafeRawBufferPointer(start: payload,
+                                                             count: payloadLength))
+            }
+        }
+        return packet
     }
 }
 
@@ -274,16 +296,10 @@ final class RawStreamServer: VideoStreamTransport {
         let currentFrameID = frameID
         frameID &+= 1
 
-        var packet = Data(count: Self.headerSize + payloadLength)
-        packet.withUnsafeMutableBytes { raw in
-            RAW1Header.write(into: raw, frameID: currentFrameID, width: UInt32(width),
-                             height: UInt32(height), format: 0,
-                             bytesPerRow: UInt32(bytesPerRow),
-                             payloadLength: UInt32(payloadLength))
-            if let dst = raw.baseAddress?.advanced(by: Self.headerSize) {
-                dst.copyMemory(from: basePtr, count: payloadLength)
-            }
-        }
+        let packet = RAW1Header.makePacket(frameID: currentFrameID, width: UInt32(width),
+                                           height: UInt32(height), format: 0,
+                                           bytesPerRow: UInt32(bytesPerRow),
+                                           payload: basePtr, payloadLength: payloadLength)
 
         send(packet)
         sentCount &+= 1
@@ -311,17 +327,10 @@ final class RawStreamServer: VideoStreamTransport {
         let currentFrameID = frameID
         frameID &+= 1
 
-        var packet = Data(count: Self.headerSize + jpegData.count)
-        packet.withUnsafeMutableBytes { raw in
-            RAW1Header.write(into: raw, frameID: currentFrameID, width: UInt32(width),
-                             height: UInt32(height), format: 10, bytesPerRow: 0,
-                             payloadLength: UInt32(jpegData.count))
-            jpegData.withUnsafeBytes { src in
-                if let dst = raw.baseAddress?.advanced(by: Self.headerSize),
-                   let srcBase = src.baseAddress {
-                    dst.copyMemory(from: srcBase, count: jpegData.count)
-                }
-            }
+        let packet = jpegData.withUnsafeBytes { src in
+            RAW1Header.makePacket(frameID: currentFrameID, width: UInt32(width),
+                                  height: UInt32(height), format: 10, bytesPerRow: 0,
+                                  payload: src.baseAddress, payloadLength: jpegData.count)
         }
 
         send(packet)
@@ -337,17 +346,10 @@ final class RawStreamServer: VideoStreamTransport {
         let currentFrameID = frameID
         frameID &+= 1
 
-        var packet = Data(count: Self.headerSize + h264Data.count)
-        packet.withUnsafeMutableBytes { raw in
-            RAW1Header.write(into: raw, frameID: currentFrameID, width: UInt32(width),
-                             height: UInt32(height), format: 20, bytesPerRow: 0,
-                             payloadLength: UInt32(h264Data.count))
-            h264Data.withUnsafeBytes { src in
-                if let dst = raw.baseAddress?.advanced(by: Self.headerSize),
-                   let srcBase = src.baseAddress {
-                    dst.copyMemory(from: srcBase, count: h264Data.count)
-                }
-            }
+        let packet = h264Data.withUnsafeBytes { src in
+            RAW1Header.makePacket(frameID: currentFrameID, width: UInt32(width),
+                                  height: UInt32(height), format: 20, bytesPerRow: 0,
+                                  payload: src.baseAddress, payloadLength: h264Data.count)
         }
 
         send(packet)
