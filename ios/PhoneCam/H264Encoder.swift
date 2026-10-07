@@ -40,7 +40,7 @@ enum H264Quality: String, CaseIterable {
 
 /// H.264 硬件编码器封装（VTCompressionSession）。
 ///
-/// 输入：AVCaptureVideoDataOutput 输出的 CVPixelBuffer（h264 采集模式下为 420f/NV12 原生格式，
+/// 输入：AVCaptureVideoDataOutput 输出的 CVPixelBuffer（h264 采集模式下为 420v/NV12 原生格式，
 /// jpeg/bgra 模式下为 BGRA——VTCompressionSession 均可直接编码）。
 /// 输出：Annex-B 格式 H.264 NAL 字节流（每个 encode 调用对应一个 Access Unit，
 ///       关键帧 AU 包含 SPS+PPS+IDR，P 帧 AU 仅含 P-slice）。

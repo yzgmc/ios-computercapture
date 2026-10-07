@@ -226,8 +226,8 @@ class CaptureManager: NSObject, ObservableObject {
 
             let videoOutput = AVCaptureVideoDataOutput()
             self.videoOutput = videoOutput
-            // 像素格式按编码方式选择：h264 用 420f（NV12，硬编原生输入，省去每帧
-            // BGRA→NV12 转换），jpeg/bgra 用 BGRA（编码/直发路径所需）
+            // 像素格式按编码方式选择：h264 用 420v（NV12 原生格式，采集/硬编零转换），
+            // jpeg/bgra 用 BGRA（编码/直发路径所需）
             applyVideoOutputPixelFormat()
             // 丢帧策略：实时性优先，背压由 RawStreamServer 处理
             videoOutput.alwaysDiscardsLateVideoFrames = true
@@ -276,14 +276,14 @@ class CaptureManager: NSObject, ObservableObject {
     }
 
     /// 按当前编码方式设置视频输出像素格式：
-    /// - h264: 420f（NV12）——VTCompressionSession 原生输入，免去每帧 BGRA→NV12 转换
-    ///   （1080p60 下 BGRA 输入需约 500MB/s 内存带宽做转换，420f 仅约 190MB/s）；
+    /// - h264: 420v（NV12 VideoRange）——摄像头原生输出 + VTCompressionSession 原生输入，
+    ///   采集与硬编两侧均零格式转换（BGRA 路径 1080p60 需约 500MB/s 内存带宽做转换）；
     /// - jpeg/bgra: 32BGRA——JPEG 编码（VTCreateCGImageFromCVPixelBuffer）与 BGRA 直发所需。
     /// 需在 captureSession.beginConfiguration()/commitConfiguration() 之间调用。
     private func applyVideoOutputPixelFormat() {
         guard let videoOutput = videoOutput else { return }
         let pixelFormat: OSType = videoCodec == .h264
-            ? kCVPixelFormatType_420f
+            ? kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange   // '420v' NV12
             : kCVPixelFormatType_32BGRA
         videoOutput.videoSettings = [
             kCVPixelBufferPixelFormatTypeKey as String: pixelFormat
@@ -439,7 +439,7 @@ extension CaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptur
                 processVideoFrameAsJPEG(sampleBuffer)
             case .bgra:
                 // BGRA 无压缩路径：带宽极高（1080p60 ≈ 500 MB/s），仅 WiFi 6/USB 3 可用。
-                // requiresBGRAConversion=true：切换编码方式的过渡帧可能是 420f，
+                // requiresBGRAConversion=true：切换编码方式的过渡帧可能是 420v，
                 // 交给传输层校验并丢弃，避免把 NV12 字节当 BGRA 发出去（花屏）
                 rawStreamServer?.processSampleBuffer(sampleBuffer, requiresBGRAConversion: true)
             }
@@ -538,7 +538,7 @@ extension CaptureManager {
     /// 编码方式/质量切换时的处理：H.264 编码器需重新配置（下次 processVideoFrameAsH264 触发），
     /// 切换到 H.264 或切换质量预设时强制下一帧为 IDR。
     private func reconfigureEncoder() async {
-        // 编码方式切换时同步切换输出像素格式（h264↔420f，jpeg/bgra↔BGRA）
+        // 编码方式切换时同步切换输出像素格式（h264↔420v，jpeg/bgra↔BGRA）
         captureSession.beginConfiguration()
         applyVideoOutputPixelFormat()
         captureSession.commitConfiguration()
